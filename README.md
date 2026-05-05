@@ -35,10 +35,6 @@ RefChecker 适合在论文写作、毕业设计、综述整理或参考文献清
 ```text
 .
 ├── check_bib_crossref.py          # 主程序：解析 BibTeX 并调用 CrossRef / OpenAlex / DBLP 核验
-├── ref.bib                        # 示例 BibTeX 文件
-├── ref_verification_report.md     # 示例 Markdown 核验报告
-├── ref_verification.csv           # 示例 CSV 核验结果
-├── GITHUB_DESCRIPTION.md          # GitHub 仓库描述建议
 └── README.md
 ```
 
