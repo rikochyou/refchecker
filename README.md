@@ -302,4 +302,4 @@ CrossRef 主要依赖出版商注册的 DOI 元数据。部分会议论文、预
 
 ## License
 
-尚未指定许可证。开源前建议添加 `LICENSE` 文件，例如 MIT License。
+MIT License
