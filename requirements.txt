@@ -1,0 +1,4 @@
+bibtexparser
+requests
+pyinstaller
+python-docx>=1.0.0
