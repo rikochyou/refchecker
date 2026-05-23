@@ -7,7 +7,7 @@ RefChecker 适合在论文写作、毕业设计、综述整理或参考文献清
 - **BibTeX 模式**：读取 `.bib` 文件，解析文献条目，通过 DOI 精确查询 → CrossRef 标题检索 → OpenAlex / DBLP 兜底 → URL 直连验证；
 - **DOCX 模式**：自动识别 APA 格式的参考文献段落，提取 DOI / 标题 / 作者 / 年份后进行相同的多源核验；
 - 提供 **Flutter 桌面界面**，也支持 **命令行** 直接调用；
-- 提供 **免安装 Windows 便携版**，下载即用。
+- 提供 **Windows 便携版**和 **macOS DMG**，下载即用。
 
 > 注意：本项目是"辅助核验"工具，不能单独作为判断文献真实性的唯一依据。未匹配不一定代表文献不存在，匹配成功也建议结合 DOI、作者、年份和期刊/会议进一步确认。
 
@@ -35,7 +35,11 @@ RefChecker 适合在论文写作、毕业设计、综述整理或参考文献清
 
 ### 免安装版（推荐）
 
-从 [Releases](https://github.com/rikochyou/refchecker/releases) 下载 `refchecker_portable.zip`，解压后双击 `refchecker_desktop.exe`。
+从 [Releases](https://github.com/rikochyou/refchecker/releases) 下载：
+- **Windows**：`refchecker_portable.zip`，解压后双击 `refchecker_desktop.exe`
+- **macOS**：`RefChecker.dmg`，打开后将 app 拖入 `/Applications`
+
+> macOS 首次运行时需**右键点击 app → 打开**以绕过 Gatekeeper。
 
 ### 命令行版
 
@@ -171,7 +175,11 @@ pyinstaller --onefile --name refchecker_backend check_bib_crossref.py
 ### Flutter 桌面 UI
 
 ```bash
+# Windows
 flutter build windows
+
+# macOS
+flutter build macos
 ```
 
 ## License
