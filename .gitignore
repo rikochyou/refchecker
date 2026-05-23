@@ -10,6 +10,9 @@ dist/
 *.zip
 *.exe
 backend/refchecker_backend.exe
+backend/refchecker_backend
+*.dmg
+dist_dmg/
 
 # BibTeX files (user data)
 *.bib
