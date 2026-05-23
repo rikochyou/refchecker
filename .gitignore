@@ -11,6 +11,9 @@ dist/
 *.exe
 backend/refchecker_backend.exe
 
+# BibTeX files (user data)
+*.bib
+
 # Miscellaneous
 *.class
 *.log
