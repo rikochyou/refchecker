@@ -22,6 +22,8 @@
     - 作者核查是“元数据一致性检查”，不能 100% 证明作者虚构；数据库本身也可能缺失或有误。
 """
 
+from __future__ import annotations
+
 import argparse
 import contextlib
 import csv

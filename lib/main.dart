@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -171,8 +172,6 @@ class RefCheckerHomePage extends StatefulWidget {
 }
 
 class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
-  static const _nativeDialogs = MethodChannel('refchecker/native_dialogs');
-
   final _emailController = TextEditingController();
   double _threshold = 0.85;
   double _delay = 0.2;
@@ -419,18 +418,20 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     final executableName =
         Platform.isWindows ? 'refchecker_backend.exe' : 'refchecker_backend';
     final candidates = <String>[
+      p.join(appDir, executableName),
       p.join(appDir, 'backend', executableName),
       p.join(Directory.current.path, 'backend', executableName),
     ];
     if (Platform.isMacOS) {
       candidates.add(p.normalize(p.join(appDir, '..', 'Resources', 'backend', executableName)));
+      candidates.add(p.normalize(p.join(appDir, '..', 'Resources', executableName)));
     }
     for (final candidate in candidates) {
       if (await File(candidate).exists()) {
         return _BackendCommand(executable: candidate);
       }
     }
-    final scriptPath = p.join(Directory.current.path, 'check_bib_crossref.py');
+    final scriptPath = p.join(appDir, 'check_bib_crossref.py');
     return _BackendCommand(executable: _pythonExecutable(), scriptPath: scriptPath);
   }
 
@@ -528,34 +529,19 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   }
 
   Future<String?> _pickFileWithNativeDialog() async {
-    return _invokeNativeDialog('pickBibFile');
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['bib', 'docx'],
+    );
+    if (result == null || result.files.isEmpty) return null;
+    return result.files.single.path;
   }
 
   Future<String?> _pickDirectoryWithNativeDialog({String? initialDirectory}) async {
-    return _invokeNativeDialog(
-      'pickOutputDir',
-      <String, Object?>{'initialDirectory': initialDirectory},
+    final path = await FilePicker.platform.getDirectoryPath(
+      initialDirectory: initialDirectory,
     );
-  }
-
-  Future<String?> _invokeNativeDialog(
-    String method, [
-    Map<String, Object?> arguments = const <String, Object?>{},
-  ]) async {
-    if (!Platform.isWindows) {
-      _appendLog('当前版本的原生选择器仅在 Windows 上启用');
-      return null;
-    }
-    try {
-      final result = await _nativeDialogs.invokeMethod<String>(method, arguments);
-      if (result == null || result.trim().isEmpty) {
-        return null;
-      }
-      return result;
-    } on PlatformException catch (error) {
-      _appendLog('选择器打开失败：${error.message ?? error.code}');
-      return null;
-    }
+    return path;
   }
 
   @override
