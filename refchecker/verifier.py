@@ -18,7 +18,7 @@ def _search_source(source_name: str, title: str, author: str, year: str,
                    springer_api_key: str = "", ieee_api_key: str = "",
                    core_api_key: str = "",
                    custom_rest_profiles: dict[str, dict] | None = None) -> dict:
-    """?????????????????"""
+    """调用指定数据源检索文献。"""
     if source_name == "crossref":
         return _sources.search_crossref(title, author, year, threshold, email)
     if source_name == "openalex":
@@ -41,7 +41,7 @@ def _search_source(source_name: str, title: str, author: str, year: str,
         return _custom_rest.search_custom_rest(
             custom_rest_profiles[source_name], title, author, year, threshold, email
         )
-    return {"found": False, "reason": f"?????: {source_name}"}
+    return {"found": False, "reason": f"未知数据源: {source_name}"}
 
 
 _SOURCE_NAME_LABEL = {
@@ -144,11 +144,11 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
                  use_url_verify: bool = True,
                  source_order: list[str] | None = None,
                  custom_rest_profiles: list[dict] | None = None) -> dict:
-    """?? DOI??? source_order ??????????? URL ???"""
+    """根据 DOI、source_order 依次检索数据源，并可选 URL 验证。"""
     candidates: list[dict] = []
     custom_profile_map = _custom_rest.profile_map(custom_rest_profiles)
 
-    # ?? ? 1 ??DOI ???????? ??
+    # 阶段 1：DOI 精确查询（如果提供了 DOI）
     doi_result = _sources.search_crossref_by_doi(doi, title, email) if use_crossref and doi else None
     if doi_result and doi_result.get("matched_title"):
         candidates.append(doi_result)
@@ -169,9 +169,9 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
         custom_rest_profiles=custom_profile_map,
     )
 
-    result: dict = {"found": False, "similarity": 0.0, "reason": "????????"}
+    result: dict = {"found": False, "similarity": 0.0, "reason": "未找到匹配"}
 
-    # ?? ? 2 ?????????????? ??
+    # 阶段 2：按序搜索各数据源
     for source_name in order:
         if not _source_enabled(source_name, **enabled_kwargs):
             continue
@@ -185,7 +185,7 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
         if r.get("found"):
             return enrich_result(r, bib_author=author, bib_year=year, bib_doi=doi)
 
-    # ?? ? 3 ??URL ?????? ??
+    # 阶段 3：URL 资源验证（如果提供了 URL）
     if use_url_verify and url:
         web = _url_verify.verify_url_resource(url, title, author, year, email)
         if web.get("matched_title"):
@@ -193,7 +193,7 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
         if web.get("found"):
             return enrich_result(web, bib_author=author, bib_year=year, bib_doi=doi)
 
-    # ?? ? 4 ??????????????? ??
+    # 若无精确匹配，从候选中选取最佳结果
     if candidates:
         best = max(candidates, key=lambda x: x.get("similarity", 0))
     else:
@@ -205,10 +205,10 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
         for n in order
         if _source_enabled(n, **enabled_kwargs)
     ]
-    source_label = " / ".join(source_names) if source_names else "???????"
+    source_label = " / ".join(source_names) if source_names else "未启用数据源"
     best["reason"] = (
-        f"{source_label} ???? "
-        f"(????? {best.get('similarity', 0):.0%})"
+        f"{source_label} 等数据库 "
+        f"(最高相似度仅 {best.get('similarity', 0):.0%})"
     )
     best["status"] = "not_found"
     return enrich_result(best, bib_author=author, bib_year=year, bib_doi=doi)
