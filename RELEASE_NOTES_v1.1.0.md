@@ -1,7 +1,7 @@
 # RefChecker v1.1.0 Release Notes
 
 > App build: `1.1.0+2`  
-> Release asset: `RefChecker_portable.zip`
+> Release assets: `RefChecker_portable.zip` (Windows) / `RefChecker-v1.1.0-macOS.dmg` (macOS)
 
 ## Highlights
 
@@ -30,6 +30,8 @@ RefChecker v1.1.0 focuses on a more usable desktop workflow and advanced data-so
 - Fixed "deselect all" behavior so disabled custom sources are no longer left in the active search chain.
 - Fixed mojibake/question-mark display issues in several UI labels.
 - Fixed JSONL output for API connectivity tests in the bundled backend executable.
+- Fixed garbled Chinese characters in "not found" reason messages (corrupted `????` literals in verifier.py).
+- Fixed `PathAccessException` on macOS caused by sandbox entitlements conflicting with AppleScript file picker.
 
 ### CLI changes
 
@@ -78,6 +80,8 @@ python check_bib_crossref.py \
 
 ## Installation
 
+### Windows
+
 Download and unzip:
 
 ```text
@@ -96,14 +100,28 @@ The Windows portable package includes the Python backend executable:
 backend/refchecker_backend.exe
 ```
 
+### macOS
+
+Download the DMG:
+
+```text
+RefChecker-v1.1.0-macOS.dmg
+```
+
+Open the DMG and drag `refchecker_desktop.app` to Applications. The Python backend is bundled inside the app.
+
+> macOS 首次运行时，如果系统提示来自未验证开发者，可右键点击 app → "打开"。
+
 ## Verification performed before packaging
 
 - `flutter analyze`
 - `flutter test`
 - Python `py_compile`
-- PyInstaller backend rebuild
+- PyInstaller backend rebuild (macOS arm64)
 - Flutter Windows release build
+- Flutter macOS release build
 - Backend API connectivity JSONL smoke test
+- macOS sandbox/permission smoke test
 
 ## Notes
 
