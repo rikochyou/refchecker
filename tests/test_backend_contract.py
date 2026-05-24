@@ -19,7 +19,9 @@ def test_verify_bib_file_jsonl_and_reports(tmp_path, monkeypatch):
     )
     output_dir = tmp_path / "out"
 
-    def fake_verify_entry(title, author, year, doi, threshold, email, use_openalex, use_dblp, url="", use_url_verify=True):
+    def fake_verify_entry(title, author, year, doi, threshold, email, use_openalex, use_dblp,
+                          use_semantic_scholar=True, use_arxiv=True, use_pubmed=True,
+                          url="", use_url_verify=True, **kwargs):
         return {
             "found": True,
             "status": "found",
@@ -51,11 +53,11 @@ def test_verify_bib_file_jsonl_and_reports(tmp_path, monkeypatch):
             "doi_reason": "BibTeX 缺少 DOI，数据库 DOI 为 10.1234/example",
             "bib_doi": "",
             "matched_doi": "10.1234/example",
-            "needs_review": "Yes",
-            "review_reasons": "BibTeX 缺少 DOI，数据库 DOI 为 10.1234/example",
+            "needs_review": "No",
+            "review_reasons": "",
         }
 
-    monkeypatch.setattr(backend, "verify_entry", fake_verify_entry)
+    monkeypatch.setattr(backend.verifier, "verify_entry", fake_verify_entry)
     stdout = io.StringIO()
     stderr = io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -74,17 +76,28 @@ def test_verify_bib_file_jsonl_and_reports(tmp_path, monkeypatch):
         "entry_finished",
         "summary",
     ]
+    entry_result = events[2]["result"]
+    assert entry_result["risk_level"] == "low"
+    assert entry_result["confidence_score"] >= 80
+    assert "建议补充 DOI" in entry_result["suggested_action"]
     assert events[-1]["found"] == 1
-    assert events[-1]["needs_review"] == 1
+    assert events[-1]["needs_review"] == 0
+    assert events[-1]["low_risk"] == 1
     assert result["summary"]["markdown_path"].endswith("report.md")
+    assert "html_path" not in result["summary"]
     assert (output_dir / "report.md").exists()
+    assert not (output_dir / "report.html").exists()
     assert (output_dir / "result.csv").exists()
 
     report = (output_dir / "report.md").read_text(encoding="utf-8")
     csv_text = (output_dir / "result.csv").read_text(encoding="utf-8-sig")
     assert "A Tiny Test" in report
     assert "FakeSource" in report
-    assert "demo,found,Yes" in csv_text
+    assert "需要人工核查的高风险条目" not in report
+    assert "置信度是 RefChecker" in report
+    assert "不是文献真实存在的概率" in report
+    assert "risk_level" in csv_text
+    assert "demo,found,No,low" in csv_text
 
 
 def test_parse_reference_text():
@@ -136,7 +149,9 @@ def test_verify_docx_file_jsonl_and_reports(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
 
     def fake_verify_entry(title, author, year, doi, threshold, email,
-                          use_openalex, use_dblp, url="", use_url_verify=True):
+                          use_openalex, use_dblp,
+                          use_semantic_scholar=True, use_arxiv=True, use_pubmed=True,
+                          url="", use_url_verify=True, **kwargs):
         return {
             "found": True,
             "status": "found",
@@ -172,7 +187,7 @@ def test_verify_docx_file_jsonl_and_reports(tmp_path, monkeypatch):
             "review_reasons": "",
         }
 
-    monkeypatch.setattr(backend, "verify_entry", fake_verify_entry)
+    monkeypatch.setattr(backend.verifier, "verify_entry", fake_verify_entry)
     stdout = io.StringIO()
     stderr = io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -191,13 +206,266 @@ def test_verify_docx_file_jsonl_and_reports(tmp_path, monkeypatch):
         "entry_finished",
         "summary",
     ]
+    assert events[2]["result"]["risk_level"] == "none"
+    assert events[2]["result"]["suggested_action"] == "无需处理。"
     assert events[-1]["found"] == 1
     assert events[-1]["needs_review"] == 0
     assert result["summary"]["markdown_path"].endswith("report.md")
+    assert "html_path" not in result["summary"]
     assert (output_dir / "report.md").exists()
+    assert not (output_dir / "report.html").exists()
     assert (output_dir / "result.csv").exists()
 
     report = (output_dir / "report.md").read_text(encoding="utf-8")
     csv_text = (output_dir / "result.csv").read_text(encoding="utf-8-sig")
     assert "A Test Paper" in report
     assert "FakeSource" in report
+
+
+def test_product_assessment_flags_high_risk_doi_mismatch():
+    row = {
+        "key": "bad-doi",
+        "title": "A Paper",
+        "status": "found",
+        "found": True,
+        "matched_title": "A Paper",
+        "similarity": 1.0,
+        "source": "CrossRef(DOI)",
+        "author_check": "exact",
+        "author_reason": "作者一致",
+        "first_author_match": "Yes",
+        "year_check": "exact",
+        "year_reason": "年份一致",
+        "doi_check": "mismatch",
+        "doi_reason": "DOI 不一致",
+        "bib_year": "2024",
+        "matched_year": "2024",
+        "bib_doi": "10.1/wrong",
+        "matched_doi": "10.1/right",
+        "needs_review": "No",
+        "review_reasons": "",
+    }
+
+    backend.apply_product_assessment(row)
+
+    assert row["risk_level"] == "high"
+    assert row["needs_review"] == "Yes"
+    assert "优先核对 DOI" in row["suggested_action"]
+    assert row["confidence_score"] < 90
+
+
+def test_medium_risk_year_mismatch_is_not_mandatory_review():
+    row = {
+        "key": "year-warning",
+        "title": "A Paper",
+        "status": "found",
+        "found": True,
+        "matched_title": "A Paper",
+        "similarity": 1.0,
+        "source": "OpenAlex",
+        "author_check": "exact",
+        "author_reason": "作者一致",
+        "first_author_match": "Yes",
+        "year_check": "mismatch",
+        "year_reason": "年份不一致：BibTeX 2024，数据库 2023",
+        "doi_check": "missing_in_bib",
+        "doi_reason": "BibTeX 缺少 DOI，数据库 DOI 为 10.1/example",
+        "bib_year": "2024",
+        "matched_year": "2023",
+        "bib_doi": "",
+        "matched_doi": "10.1/example",
+        "needs_review": "Yes",
+        "review_reasons": "旧策略会把年份差异计入需复核",
+    }
+
+    backend.apply_product_assessment(row)
+
+    assert row["risk_level"] == "medium"
+    assert row["needs_review"] == "No"
+    assert row["review_reasons"] == ""
+    assert "核对年份" in row["suggested_action"]
+
+
+def test_title_similarity_85_to_90_is_sampling_not_mandatory_review():
+    result = {
+        "key": "close-title",
+        "title": "A Paper With a Slightly Different Subtitle",
+        "status": "found",
+        "found": True,
+        "matched_title": "A Paper With Slightly Different Subtitle",
+        "similarity": 0.87,
+        "source": "CrossRef",
+        "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+        "authors": "Ada Lovelace",
+        "year": "1843",
+        "doi": "10.1/example",
+        "url": "",
+        "reason": "",
+    }
+
+    backend.enrich_result(
+        result,
+        bib_author="Lovelace, Ada",
+        bib_year="1843",
+        bib_doi="10.1/example",
+    )
+    backend.apply_product_assessment(result)
+
+    assert result["risk_level"] == "medium"
+    assert result["needs_review"] == "No"
+    assert result["review_reasons"] == ""
+    assert "核对标题" in result["suggested_action"]
+
+
+def test_verify_entry_uses_semantic_scholar_fallback(monkeypatch):
+    monkeypatch.setattr(
+        backend.sources,
+        "search_crossref",
+        lambda title, author, year, threshold, email: {
+            "found": False,
+            "similarity": 0.0,
+            "reason": "CrossRef 无返回结果",
+        },
+    )
+    monkeypatch.setattr(
+        backend.sources,
+        "search_semantic_scholar",
+        lambda title, author, year, threshold, email: {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "Semantic Scholar",
+            "venue": "Test Venue",
+            "year": year,
+            "type": "paper",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+            "url": "https://www.semanticscholar.org/paper/example",
+            "reason": "",
+        },
+    )
+
+    result = backend.verify_entry(
+        "A Semantic Scholar Paper",
+        "Lovelace, Ada",
+        "1843",
+        "",
+        0.85,
+        "",
+        use_openalex=False,
+        use_dblp=False,
+        use_semantic_scholar=True,
+        use_arxiv=False,
+        use_pubmed=False,
+        use_url_verify=False,
+    )
+
+    assert result["found"] is True
+    assert result["source"] == "Semantic Scholar"
+    assert result["author_check"] == "exact"
+    assert result["doi_check"] == "missing_in_bib"
+
+
+def test_source_selection_aliases_and_api_key_source(monkeypatch):
+    selected = backend.parse_source_selection("crossref, s2, arxiv, ieee-xplore")
+    assert selected == ["crossref", "semantic-scholar", "arxiv", "ieee"]
+
+    monkeypatch.setattr(
+        backend.sources,
+        "search_springer",
+        lambda title, author, year, threshold, api_key: {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "Springer Nature",
+            "venue": "Springer",
+            "year": year,
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/springer",
+            "url": "https://link.springer.com/article/10.1/springer",
+            "reason": "",
+        },
+    )
+
+    result = backend.verify_entry(
+        "A Springer Paper",
+        "Lovelace, Ada",
+        "1843",
+        "",
+        0.85,
+        "",
+        use_crossref=False,
+        use_openalex=False,
+        use_semantic_scholar=False,
+        use_arxiv=False,
+        use_pubmed=False,
+        use_dblp=False,
+        use_springer=True,
+        springer_api_key="test-key",
+        use_url_verify=False,
+    )
+
+    assert result["found"] is True
+    assert result["source"] == "Springer Nature"
+    assert result["author_check"] == "exact"
+
+
+def test_api_key_connectivity_uses_source_specific_routes(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append({
+            "url": url,
+            "params": params or {},
+            "headers": headers or {},
+            "timeout": timeout,
+        })
+        if "springernature" in url:
+            return FakeResponse({"records": [{"title": "Machine learning"}]})
+        if "ieeexploreapi" in url:
+            return FakeResponse({"articles": [{"title": "Machine learning"}]})
+        if "api.core.ac.uk" in url:
+            return FakeResponse({"results": [{"title": "Machine learning"}]})
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(backend.requests, "get", fake_get)
+
+    result = backend.test_api_keys(
+        selected_sources={"springer", "ieee", "core"},
+        springer_api_key="springer-key",
+        ieee_api_key="ieee-key",
+        core_api_key="core-key",
+        human_output=False,
+    )
+
+    assert result["summary"]["ok"] == 3
+    assert [item["status"] for item in result["results"]] == ["ok", "ok", "ok"]
+    assert calls[0]["url"] == "https://api.springernature.com/meta/v2/json"
+    assert calls[0]["params"]["api_key"] == "springer-key"
+    assert calls[1]["url"] == "https://ieeexploreapi.ieee.org/api/v1/search/articles"
+    assert calls[1]["params"]["apikey"] == "ieee-key"
+    assert calls[2]["url"] == "https://api.core.ac.uk/v3/search/works"
+    assert calls[2]["headers"]["Authorization"] == "Bearer core-key"
+
+
+def test_api_key_connectivity_reports_missing_selected_key():
+    result = backend.test_api_keys(
+        selected_sources={"springer"},
+        springer_api_key="",
+        human_output=False,
+    )
+
+    assert result["summary"]["skipped"] == 1
+    assert result["results"][0]["source"] == "springer"
+    assert result["results"][0]["status"] == "not_configured"

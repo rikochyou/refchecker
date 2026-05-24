@@ -1,7 +1,7 @@
 name: refchecker_desktop
 description: A Flutter desktop UI for the RefChecker BibTeX verification backend.
 publish_to: "none"
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -10,7 +10,6 @@ dependencies:
   flutter:
     sdk: flutter
   path: ^1.9.0
-  file_picker: ^8.0.0
 
 dev_dependencies:
   flutter_test:
@@ -19,3 +18,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/fonts/NotoSansSC-OFL.txt
+  fonts:
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC-Variable.ttf

@@ -8,8 +8,9 @@ void main() {
     await tester.pumpWidget(const RefCheckerApp());
 
     expect(find.text('RefChecker'), findsOneWidget);
-    expect(find.text('BibTeX 文件'), findsOneWidget);
+    expect(find.text('文献文件 (.bib / .docx / .txt)'), findsOneWidget);
     expect(find.text('结果保存位置'), findsOneWidget);
     expect(find.text('开始校验'), findsOneWidget);
+    expect(find.text('粘贴文本'), findsOneWidget);
   });
 }

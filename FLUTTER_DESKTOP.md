@@ -52,12 +52,26 @@ The backend writes human logs to stderr and JSONL events to stdout:
 - `summary`
 - `error`
 
+When the desktop UI tests API keys or a custom REST profile, it calls the backend for the selected source only, for example:
+
+```text
+check_bib_crossref.py --test-api-keys --jsonl-progress --sources springer
+check_bib_crossref.py --test-api-keys --jsonl-progress --sources custom:my-api --custom-rest-profiles custom_rest_profiles.json
+```
+
+The backend then emits:
+
+- `api_key_test_started`
+- `api_key_test_source_started`
+- `api_key_test_result`
+- `api_key_test_summary`
+
 `--output-dir` creates:
 
 - `report.md`
 - `result.csv`
 
-The old CLI options still work, including `--output`, `--csv`, `--threshold`, `--delay`, `--email`, `--no-openalex`, and `--no-dblp`.
+The old CLI options still work, including `--output`, `--csv`, `--threshold`, `--delay`, `--email`, `--sources`, `--no-openalex`, `--no-semantic-scholar`, `--no-arxiv`, `--no-pubmed`, `--springer-api-key`, `--ieee-api-key`, `--core-api-key`, `--test-api-keys`, and `--no-dblp`. `--delay` is clamped to a safe minimum of `0.5` seconds. Custom REST sources can be supplied with `--custom-rest-profiles`.
 
 ## Packaging
 
@@ -76,7 +90,7 @@ This creates `backend/refchecker_backend.exe`. For macOS, run the same script on
 Then build Flutter:
 
 ```powershell
-flutter build windows
+flutter build windows --release --dart-define APP_VERSION=1.1.0+2
 ```
 
 For release packaging, copy the `backend` folder next to the built app executable so the runtime layout is:
@@ -96,3 +110,7 @@ python check_bib_crossref.py smoke_missing_title.bib --jsonl-progress --output-d
 ```
 
 Expected output includes JSONL `started`, `entry_started`, `entry_finished`, and `summary` events, plus `smoke_output/report.md` and `smoke_output/result.csv`.
+
+## Release Notes
+
+For v1.1.0 release copy, see `RELEASE_NOTES_v1.1.0.md`.

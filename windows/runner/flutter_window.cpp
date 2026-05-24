@@ -40,15 +40,19 @@ std::wstring Utf8ToWide(const std::string& value) {
   return result;
 }
 
-std::optional<std::string> PickBibFile(HWND owner) {
+std::optional<std::string> PickReferenceFile(HWND owner) {
   wchar_t file_name[MAX_PATH] = {0};
   OPENFILENAMEW dialog = {0};
   dialog.lStructSize = sizeof(dialog);
   dialog.hwndOwner = owner;
-  dialog.lpstrFilter = L"BibTeX files (*.bib)\0*.bib\0All files (*.*)\0*.*\0";
+  dialog.lpstrFilter =
+      L"Reference files (*.bib;*.docx)\0*.bib;*.docx\0"
+      L"BibTeX files (*.bib)\0*.bib\0"
+      L"Word documents (*.docx)\0*.docx\0"
+      L"All files (*.*)\0*.*\0";
   dialog.lpstrFile = file_name;
   dialog.nMaxFile = MAX_PATH;
-  dialog.lpstrTitle = L"选择 BibTeX 文件";
+  dialog.lpstrTitle = L"Select BibTeX or DOCX reference file";
   dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
   if (GetOpenFileNameW(&dialog) == TRUE) {
@@ -77,7 +81,7 @@ std::optional<std::string> PickOutputDir(HWND owner,
 
   BROWSEINFOW browse = {0};
   browse.hwndOwner = owner;
-  browse.lpszTitle = L"选择结果保存位置";
+  browse.lpszTitle = L"Select output folder";
   browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
   browse.lpfn = initial_directory.empty() ? nullptr : BrowseCallbackProc;
   browse.lParam = initial_directory.empty()
@@ -134,7 +138,7 @@ bool FlutterWindow::OnCreate() {
                  result) {
         std::optional<std::string> selected;
         if (call.method_name() == "pickBibFile") {
-          selected = PickBibFile(GetHandle());
+          selected = PickReferenceFile(GetHandle());
         } else if (call.method_name() == "pickOutputDir") {
           selected = PickOutputDir(GetHandle(), call.arguments());
         } else {

@@ -3,7 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.venv_build/
 dist/
+dist_portable/
 *.spec
 
 # Binary release
@@ -14,8 +16,22 @@ backend/refchecker_backend
 *.dmg
 dist_dmg/
 
+# Generated verification outputs
+refchecker_*/
+report*.md
+result*.csv
+ref_verification*.csv
+ref_verification_report.md
+run_verification.log
+
+# Local/private working files
+.claude/
+References.docx
+
 # BibTeX files (user data)
 *.bib
+!examples/
+!examples/*.bib
 
 # Miscellaneous
 *.class
