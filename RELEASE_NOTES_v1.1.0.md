@@ -110,7 +110,10 @@ RefChecker-v1.1.0-macOS.dmg
 
 Open the DMG and drag `refchecker_desktop.app` to Applications. The Python backend is bundled inside the app.
 
-> macOS 首次运行时，如果系统提示来自未验证开发者，可右键点击 app → "打开"。
+> macOS 首次运行时可能出现"已损坏"提示（未公证的应用），在终端执行以下命令即可：
+> ```bash
+> xattr -cr /Applications/refchecker_desktop.app
+> ```
 
 ## Verification performed before packaging
 
