@@ -1,0 +1,202 @@
+#refchecker-claude-panel {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 2147483647;
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  border: 1px solid #d5ded5;
+  border-radius: 14px;
+  background: #ffffff;
+  color: #18211f;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+#refchecker-claude-panel .rc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #eef6f2;
+  border-bottom: 1px solid #d5ded5;
+}
+
+#refchecker-claude-panel .rc-title {
+  font-size: 16px;
+  font-weight: 750;
+}
+
+#refchecker-claude-panel .rc-subtitle,
+#refchecker-claude-panel .rc-muted {
+  color: #5a655e;
+  font-size: 12px;
+}
+
+#refchecker-claude-panel .rc-close {
+  border: 0;
+  background: transparent;
+  color: #35413b;
+  cursor: pointer;
+  font-size: 24px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+#refchecker-claude-panel .rc-body {
+  overflow: auto;
+  max-height: calc(100vh - 92px);
+  padding: 14px;
+}
+
+#refchecker-claude-panel h3 {
+  margin: 16px 0 8px;
+  font-size: 14px;
+}
+
+#refchecker-claude-panel code,
+#refchecker-claude-panel pre {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#refchecker-claude-panel pre {
+  margin: 8px 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: #f6f7f4;
+}
+
+#refchecker-claude-panel .rc-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+#refchecker-claude-panel .rc-grid div {
+  padding: 8px;
+  border: 1px solid #e2e7df;
+  border-radius: 10px;
+  background: #fbfcfa;
+  text-align: center;
+}
+
+#refchecker-claude-panel .rc-grid b {
+  display: block;
+  font-size: 18px;
+}
+
+#refchecker-claude-panel .rc-grid span {
+  color: #667166;
+  font-size: 12px;
+}
+
+#refchecker-claude-panel .rc-item {
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid #e2e7df;
+  border-radius: 10px;
+  background: #fffefa;
+}
+
+#refchecker-claude-panel .rc-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+#refchecker-claude-panel .rc-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: #e8eee9;
+}
+
+#refchecker-claude-panel .rc-high,
+#refchecker-claude-panel .rc-not_found {
+  background: #ffe2de;
+  color: #9b2f24;
+}
+
+#refchecker-claude-panel .rc-medium {
+  background: #fff0c7;
+  color: #7a5200;
+}
+
+#refchecker-claude-panel .rc-low {
+  background: #e9f6ff;
+  color: #205c86;
+}
+
+#refchecker-claude-panel .rc-none,
+#refchecker-claude-panel .rc-found {
+  background: #e9f7ef;
+  color: #1e6b3f;
+}
+
+#refchecker-claude-panel .rc-source {
+  color: #5a655e;
+}
+
+#refchecker-claude-panel .rc-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 0;
+}
+
+#refchecker-claude-panel .rc-spinner {
+  width: 18px;
+  height: 18px;
+  border: 3px solid #d8e5dd;
+  border-top-color: #1f7a6d;
+  border-radius: 50%;
+  animation: rc-spin 1s linear infinite;
+}
+
+#refchecker-claude-panel .rc-error {
+  padding: 10px;
+  border: 1px solid #ffc8c1;
+  border-radius: 10px;
+  background: #fff3f1;
+}
+
+#refchecker-claude-panel .rc-copy {
+  cursor: pointer;
+  border: 1px solid #1f7a6d;
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: #1f7a6d;
+  color: #fff;
+}
+
+#refchecker-claude-panel .rc-paths {
+  padding-left: 18px;
+}
+
+#refchecker-claude-float {
+  position: fixed;
+  z-index: 2147483646;
+  border: 1px solid #1f7a6d;
+  border-radius: 999px;
+  padding: 7px 10px;
+  background: #1f7a6d;
+  color: #fff;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+@keyframes rc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

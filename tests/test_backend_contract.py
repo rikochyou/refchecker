@@ -367,6 +367,181 @@ def test_verify_entry_uses_semantic_scholar_fallback(monkeypatch):
     assert result["doi_check"] == "missing_in_bib"
 
 
+def test_verify_entry_global_arbitration_prefers_crossref_high_confidence(monkeypatch):
+    calls = []
+
+    def fake_crossref_by_doi(doi, title, email):
+        calls.append("crossref-doi")
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "CrossRef(DOI)",
+            "venue": "CrossRef",
+            "year": "1843",
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": doi,
+            "url": f"https://doi.org/{doi}",
+            "reason": "",
+            "doi_exact_query": True,
+        }
+
+    def fake_semantic(title, author, year, threshold, email):
+        calls.append("semantic-scholar")
+        return {
+            "found": True,
+            "matched_title": "A different Semantic Scholar Paper",
+            "similarity": 0.08,
+            "source": "Semantic Scholar",
+            "venue": "Test Venue",
+            "year": year,
+            "type": "paper",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+            "url": "https://www.semanticscholar.org/paper/example",
+            "reason": "",
+        }
+
+    monkeypatch.setattr(backend.sources, "search_crossref_by_doi", fake_crossref_by_doi)
+    monkeypatch.setattr(backend.sources, "search_semantic_scholar", fake_semantic)
+
+    result = backend.verify_entry(
+        "A Semantic Scholar Paper",
+        "Lovelace, Ada",
+        "1843",
+        "10.1/example",
+        0.85,
+        "",
+        use_openalex=False,
+        use_dblp=False,
+        use_semantic_scholar=True,
+        use_arxiv=False,
+        use_pubmed=False,
+        use_crossref=True,
+        use_url_verify=False,
+        source_order=["semantic-scholar", "crossref"],
+    )
+
+    assert result["found"] is True
+    assert result["source"] == "CrossRef(DOI)"
+    assert result["candidate_count"] == 2
+    assert "Semantic Scholar" in result["alternative_candidates"]
+    assert "并发核验" in result["arbitration_reason"]
+    assert set(calls) == {"semantic-scholar", "crossref-doi"}
+
+
+def test_verify_entry_uses_source_order_as_tiebreaker(monkeypatch):
+    def fake_crossref(title, author, year, threshold, email):
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "CrossRef",
+            "venue": "CrossRef",
+            "year": year,
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+            "url": "https://doi.org/10.1/example",
+            "reason": "",
+        }
+
+    def fake_semantic(title, author, year, threshold, email):
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "Semantic Scholar",
+            "venue": "Test Venue",
+            "year": year,
+            "type": "paper",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+            "url": "https://www.semanticscholar.org/paper/example",
+            "reason": "",
+        }
+
+    monkeypatch.setattr(backend.sources, "search_crossref", fake_crossref)
+    monkeypatch.setattr(backend.sources, "search_semantic_scholar", fake_semantic)
+
+    result = backend.verify_entry(
+        "A Tie Breaker Paper",
+        "Lovelace, Ada",
+        "1843",
+        "",
+        0.85,
+        "",
+        use_openalex=False,
+        use_dblp=False,
+        use_semantic_scholar=True,
+        use_arxiv=False,
+        use_pubmed=False,
+        use_crossref=True,
+        use_url_verify=False,
+        source_order=["semantic-scholar", "crossref"],
+    )
+
+    assert result["found"] is True
+    assert result["source"] == "Semantic Scholar"
+    assert result["candidate_count"] == 2
+    assert "CrossRef" in result["alternative_candidates"]
+
+
+def test_verify_entry_uses_crossref_doi_when_crossref_is_first(monkeypatch):
+    calls = []
+
+    def fake_crossref_by_doi(doi, title, email):
+        calls.append("crossref-doi")
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "CrossRef(DOI)",
+            "venue": "CrossRef",
+            "year": "1843",
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": doi,
+            "url": f"https://doi.org/{doi}",
+            "reason": "",
+            "doi_exact_query": True,
+        }
+
+    def fake_semantic(title, author, year, threshold, email):
+        calls.append("semantic-scholar")
+        return {"found": False, "similarity": 0.0, "reason": "not reached"}
+
+    monkeypatch.setattr(backend.sources, "search_crossref_by_doi", fake_crossref_by_doi)
+    monkeypatch.setattr(backend.sources, "search_semantic_scholar", fake_semantic)
+
+    result = backend.verify_entry(
+        "A CrossRef DOI Paper",
+        "Lovelace, Ada",
+        "1843",
+        "10.1/example",
+        0.85,
+        "",
+        use_openalex=False,
+        use_dblp=False,
+        use_semantic_scholar=True,
+        use_arxiv=False,
+        use_pubmed=False,
+        use_crossref=True,
+        use_url_verify=False,
+        source_order=["crossref", "semantic-scholar"],
+    )
+
+    assert result["found"] is True
+    assert result["source"] == "CrossRef(DOI)"
+    assert "crossref-doi" in calls
+
+
 def test_source_selection_aliases_and_api_key_source(monkeypatch):
     selected = backend.parse_source_selection("crossref, s2, arxiv, ieee-xplore")
     assert selected == ["crossref", "semantic-scholar", "arxiv", "ieee"]

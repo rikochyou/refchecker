@@ -1,4 +1,4 @@
-"""RefChecker — AI 幻觉引用与参考文献元数据核验."""
+"""RefChecker — 疑似虚构引用与参考文献元数据核验."""
 import argparse
 import os
 import sys
@@ -8,6 +8,7 @@ from .config import parse_source_selection, build_source_order, source_selected,
 from .batch import verify_bib_file, verify_docx_file, verify_text
 from .verifier import emit_jsonl
 from .custom_rest import load_profiles_file
+from .version import APP_VERSION
 
 def main():
     # 确保 stdout/stderr 使用 UTF-8，避免 Windows GBK 控制台因 emoji 崩溃
@@ -18,9 +19,12 @@ def main():
             except Exception:
                 pass
 
-    parser = argparse.ArgumentParser(description="筛查疑似 AI 幻觉引用并核验 BibTeX / DOCX 参考文献可信度")
+    parser = argparse.ArgumentParser(description="筛查疑似虚构引用并核验 BibTeX / DOCX 参考文献可信度")
+    parser.add_argument("--version", action="version", version=f"RefChecker {APP_VERSION}")
     parser.add_argument("file", nargs="?",
                         help=".bib 或 .docx 文件路径；使用 --test-api-keys 时可省略")
+    parser.add_argument("--app-version", default=APP_VERSION,
+                        help="写入报告/JSONL 摘要的应用版本号，默认使用后端内置版本")
     parser.add_argument("--threshold", type=float, default=0.85,
                         help="标题相似度阈值 (0-1)，默认 0.85")
     parser.add_argument("--delay", type=float, default=0.5,
@@ -30,6 +34,8 @@ def main():
     parser.add_argument("--sources", default="",
                         help="可选: 指定优先搜索的数据源及顺序，逗号分隔；未列出的数据源仍作为兜底。"
                              "如 crossref,openalex,semantic-scholar,arxiv,pubmed,dblp,url,springer,ieee,core")
+    parser.add_argument("--no-crossref", action="store_true",
+                        help="??? CrossRef??? CrossRef DOI ????")
     parser.add_argument("--no-openalex", action="store_true",
                         help="不使用 OpenAlex 兜底")
     parser.add_argument("--no-semantic-scholar", action="store_true",
@@ -98,7 +104,7 @@ def main():
         if args.text:
             verify_text(args.text, threshold=args.threshold, delay=args.delay,
                         email=args.email,
-                        use_crossref=source_selected(selected_sources, "crossref", True),
+                        use_crossref=source_selected(selected_sources, "crossref", True) and not args.no_crossref,
                         use_openalex=source_selected(selected_sources, "openalex", True) and not args.no_openalex,
                         use_dblp=source_selected(selected_sources, "dblp", True) and not args.no_dblp,
                         use_semantic_scholar=source_selected(selected_sources, "semantic-scholar", True) and not args.no_semantic_scholar,
@@ -113,6 +119,7 @@ def main():
                         use_url_verify=source_selected(selected_sources, "url", True) and not args.no_url_verify,
                         source_order=build_source_order(selected_sources, custom_source_keys),
                         custom_rest_profiles=custom_rest_profiles,
+                        app_version=args.app_version,
                         output=args.output,
                         csv_path=args.csv,
                         output_dir=args.output_dir,
@@ -126,7 +133,7 @@ def main():
             threshold=args.threshold,
             delay=args.delay,
             email=args.email,
-            use_crossref=source_selected(selected_sources, "crossref", True),
+            use_crossref=source_selected(selected_sources, "crossref", True) and not args.no_crossref,
             use_openalex=source_selected(selected_sources, "openalex", True) and not args.no_openalex,
             use_dblp=source_selected(selected_sources, "dblp", True) and not args.no_dblp,
             use_semantic_scholar=source_selected(selected_sources, "semantic-scholar", True) and not args.no_semantic_scholar,
@@ -141,6 +148,7 @@ def main():
             use_url_verify=source_selected(selected_sources, "url", True) and not args.no_url_verify,
             source_order=build_source_order(selected_sources, custom_source_keys),
             custom_rest_profiles=custom_rest_profiles,
+            app_version=args.app_version,
             output=args.output,
             csv_path=args.csv,
             output_dir=args.output_dir,

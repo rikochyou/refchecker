@@ -1,4 +1,4 @@
-"""RefChecker — AI 幻觉引用与参考文献元数据核验."""
+"""RefChecker — 疑似虚构引用与参考文献元数据核验."""
 import os
 import re
 import sys

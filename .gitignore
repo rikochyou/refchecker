@@ -17,7 +17,7 @@ backend/refchecker_backend
 dist_dmg/
 
 # Generated verification outputs
-refchecker_*/
+/refchecker_*/
 report*.md
 result*.csv
 ref_verification*.csv

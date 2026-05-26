@@ -222,6 +222,7 @@ class RunSettings {
     required this.sources,
     required this.sourceOrder,
     required this.customApiSources,
+    required this.useCrossref,
     required this.useOpenAlex,
     required this.useSemanticScholar,
     required this.useArxiv,
@@ -239,6 +240,7 @@ class RunSettings {
   final String sources;
   final List<String> sourceOrder;
   final List<CustomApiSource> customApiSources;
+  final bool useCrossref;
   final bool useOpenAlex;
   final bool useSemanticScholar;
   final bool useArxiv;
@@ -262,7 +264,7 @@ class RunSettings {
       return false;
     }
     return switch (key) {
-      'crossref' => true,
+      'crossref' => useCrossref,
       'openalex' => useOpenAlex,
       'semantic-scholar' => useSemanticScholar,
       'arxiv' => useArxiv,
@@ -285,6 +287,7 @@ class RunSettings {
         'sources': effectiveSources,
         'sourceOrder': sourceOrder,
         'customApiSources': customApiSources.map((s) => s.toJson()).toList(),
+        'useCrossref': useCrossref,
         'useOpenAlex': useOpenAlex,
         'useSemanticScholar': useSemanticScholar,
         'useArxiv': useArxiv,
@@ -312,6 +315,7 @@ class RunSettings {
       sources: asString(json['sources']),
       sourceOrder: order,
       customApiSources: apiSources,
+      useCrossref: json['useCrossref'] as bool? ?? true,
       useOpenAlex: json['useOpenAlex'] as bool? ?? true,
       useSemanticScholar: json['useSemanticScholar'] as bool? ?? true,
       useArxiv: json['useArxiv'] as bool? ?? true,
@@ -341,6 +345,11 @@ class RunSummary {
     this.markdownPath = '',
     this.csvPath = '',
     this.outputDir = '',
+    this.citationConsistencyPath = '',
+    this.reportSummary = '',
+    this.missingReferenceCitations = 0,
+    this.uncitedReferences = 0,
+    this.duplicateReferenceSignatures = 0,
   });
 
   final int total;
@@ -357,6 +366,11 @@ class RunSummary {
   final String markdownPath;
   final String csvPath;
   final String outputDir;
+  final String citationConsistencyPath;
+  final String reportSummary;
+  final int missingReferenceCitations;
+  final int uncitedReferences;
+  final int duplicateReferenceSignatures;
 
   RunSummary copyWith({
     int? total,
@@ -373,6 +387,11 @@ class RunSummary {
     String? markdownPath,
     String? csvPath,
     String? outputDir,
+    String? citationConsistencyPath,
+    String? reportSummary,
+    int? missingReferenceCitations,
+    int? uncitedReferences,
+    int? duplicateReferenceSignatures,
   }) {
     return RunSummary(
       total: total ?? this.total,
@@ -389,6 +408,14 @@ class RunSummary {
       markdownPath: markdownPath ?? this.markdownPath,
       csvPath: csvPath ?? this.csvPath,
       outputDir: outputDir ?? this.outputDir,
+      citationConsistencyPath:
+          citationConsistencyPath ?? this.citationConsistencyPath,
+      reportSummary: reportSummary ?? this.reportSummary,
+      missingReferenceCitations:
+          missingReferenceCitations ?? this.missingReferenceCitations,
+      uncitedReferences: uncitedReferences ?? this.uncitedReferences,
+      duplicateReferenceSignatures:
+          duplicateReferenceSignatures ?? this.duplicateReferenceSignatures,
     );
   }
 
@@ -408,6 +435,12 @@ class RunSummary {
       markdownPath: asString(json['markdown_path']),
       csvPath: asString(json['csv_path']),
       outputDir: asString(json['output_dir']),
+      citationConsistencyPath: asString(json['citation_consistency_path']),
+      reportSummary: asString(json['report_summary']),
+      missingReferenceCitations: asInt(json['missing_reference_citations']),
+      uncitedReferences: asInt(json['uncited_references']),
+      duplicateReferenceSignatures:
+          asInt(json['duplicate_reference_signatures']),
     );
   }
 }
@@ -424,6 +457,28 @@ class EntryResult {
     required this.source,
     required this.similarity,
     required this.reason,
+    required this.matchedTitle,
+    required this.riskExplanation,
+    required this.fixSuggestion,
+    required this.fixSuggestionBasis,
+    required this.candidateCount,
+    required this.arbitrationReason,
+    required this.sourceTrace,
+    required this.alternativeCandidates,
+    required this.candidateConflict,
+    required this.standardCitationAvailable,
+    required this.standardCitationBasis,
+    required this.standardCitationApa,
+    required this.standardCitationBibtex,
+    required this.standardCitationGbt7714,
+    required this.authorCheck,
+    required this.authorReason,
+    required this.yearCheck,
+    required this.yearReason,
+    required this.doiCheck,
+    required this.doiReason,
+    required this.bibDoi,
+    required this.matchedDoi,
   });
 
   final String key;
@@ -436,6 +491,28 @@ class EntryResult {
   final String source;
   final double? similarity;
   final String reason;
+  final String matchedTitle;
+  final String riskExplanation;
+  final String fixSuggestion;
+  final String fixSuggestionBasis;
+  final int candidateCount;
+  final String arbitrationReason;
+  final String sourceTrace;
+  final String alternativeCandidates;
+  final String candidateConflict;
+  final bool standardCitationAvailable;
+  final String standardCitationBasis;
+  final String standardCitationApa;
+  final String standardCitationBibtex;
+  final String standardCitationGbt7714;
+  final String authorCheck;
+  final String authorReason;
+  final String yearCheck;
+  final String yearReason;
+  final String doiCheck;
+  final String doiReason;
+  final String bibDoi;
+  final String matchedDoi;
 
   factory EntryResult.fromJson(Map<String, dynamic> json) {
     final result = json['result'] is Map<String, dynamic>
@@ -452,6 +529,104 @@ class EntryResult {
       source: asString(result['source']),
       similarity: asDouble(result['similarity']),
       reason: asString(result['reason']),
+      matchedTitle: asString(result['matched_title']),
+      riskExplanation: asString(result['risk_explanation']),
+      fixSuggestion: asString(result['fix_suggestion']),
+      fixSuggestionBasis: asString(result['fix_suggestion_basis']),
+      candidateCount: asInt(result['candidate_count']),
+      arbitrationReason: asString(result['arbitration_reason']),
+      sourceTrace: asString(result['source_trace']),
+      alternativeCandidates: asString(result['alternative_candidates']),
+      candidateConflict: asString(result['candidate_conflict']),
+      standardCitationAvailable:
+          asString(result['standard_citation_available']) == 'Yes',
+      standardCitationBasis: asString(result['standard_citation_basis']),
+      standardCitationApa: asString(result['standard_citation_apa']),
+      standardCitationBibtex: asString(result['standard_citation_bibtex']),
+      standardCitationGbt7714: asString(result['standard_citation_gbt7714']),
+      authorCheck: asString(result['author_check']),
+      authorReason: asString(result['author_reason']),
+      yearCheck: asString(result['year_check']),
+      yearReason: asString(result['year_reason']),
+      doiCheck: asString(result['doi_check']),
+      doiReason: asString(result['doi_reason']),
+      bibDoi: asString(result['bib_doi']),
+      matchedDoi: asString(result['matched_doi']),
+    );
+  }
+
+  EntryResult copyWith({
+    String? key,
+    String? title,
+    String? status,
+    bool? needsReview,
+    String? riskLevel,
+    int? confidenceScore,
+    String? suggestedAction,
+    String? source,
+    double? similarity,
+    String? reason,
+    String? matchedTitle,
+    String? riskExplanation,
+    String? fixSuggestion,
+    String? fixSuggestionBasis,
+    int? candidateCount,
+    String? arbitrationReason,
+    String? sourceTrace,
+    String? alternativeCandidates,
+    String? candidateConflict,
+    bool? standardCitationAvailable,
+    String? standardCitationBasis,
+    String? standardCitationApa,
+    String? standardCitationBibtex,
+    String? standardCitationGbt7714,
+    String? authorCheck,
+    String? authorReason,
+    String? yearCheck,
+    String? yearReason,
+    String? doiCheck,
+    String? doiReason,
+    String? bibDoi,
+    String? matchedDoi,
+  }) {
+    return EntryResult(
+      key: key ?? this.key,
+      title: title ?? this.title,
+      status: status ?? this.status,
+      needsReview: needsReview ?? this.needsReview,
+      riskLevel: riskLevel ?? this.riskLevel,
+      confidenceScore: confidenceScore ?? this.confidenceScore,
+      suggestedAction: suggestedAction ?? this.suggestedAction,
+      source: source ?? this.source,
+      similarity: similarity ?? this.similarity,
+      reason: reason ?? this.reason,
+      matchedTitle: matchedTitle ?? this.matchedTitle,
+      riskExplanation: riskExplanation ?? this.riskExplanation,
+      fixSuggestion: fixSuggestion ?? this.fixSuggestion,
+      fixSuggestionBasis: fixSuggestionBasis ?? this.fixSuggestionBasis,
+      candidateCount: candidateCount ?? this.candidateCount,
+      arbitrationReason: arbitrationReason ?? this.arbitrationReason,
+      sourceTrace: sourceTrace ?? this.sourceTrace,
+      alternativeCandidates:
+          alternativeCandidates ?? this.alternativeCandidates,
+      candidateConflict: candidateConflict ?? this.candidateConflict,
+      standardCitationAvailable:
+          standardCitationAvailable ?? this.standardCitationAvailable,
+      standardCitationBasis:
+          standardCitationBasis ?? this.standardCitationBasis,
+      standardCitationApa: standardCitationApa ?? this.standardCitationApa,
+      standardCitationBibtex:
+          standardCitationBibtex ?? this.standardCitationBibtex,
+      standardCitationGbt7714:
+          standardCitationGbt7714 ?? this.standardCitationGbt7714,
+      authorCheck: authorCheck ?? this.authorCheck,
+      authorReason: authorReason ?? this.authorReason,
+      yearCheck: yearCheck ?? this.yearCheck,
+      yearReason: yearReason ?? this.yearReason,
+      doiCheck: doiCheck ?? this.doiCheck,
+      doiReason: doiReason ?? this.doiReason,
+      bibDoi: bibDoi ?? this.bibDoi,
+      matchedDoi: matchedDoi ?? this.matchedDoi,
     );
   }
 }

@@ -326,7 +326,7 @@ class ControlPanel extends StatelessWidget {
               ),
               const SizedBox(height: 6),
               const Text(
-                '拖拽排序设置搜索优先级，开关控制数据源启用/禁用',
+                '拖拽排序决定优先查询顺序；系统会并发核验多个来源并按匹配质量仲裁，质量接近时才按排序优先。',
                 style: TextStyle(
                     color: Color(0xff596158), fontSize: 11, height: 1.35),
               ),
@@ -361,7 +361,6 @@ class ControlPanel extends StatelessWidget {
                       final key = sourceOrder[index];
                       final name = sourceNames[key] ?? key;
                       final enabled = sourceEnabled(key);
-                      final isAlwaysOn = key == 'crossref';
                       return Container(
                         key: ValueKey(key),
                         color: Colors.white,
@@ -383,32 +382,21 @@ class ControlPanel extends StatelessWidget {
                                 name,
                                 style: TextStyle(
                                   fontSize: 14,
-                                  fontWeight: isAlwaysOn
-                                      ? FontWeight.w700
-                                      : FontWeight.w400,
+                                  fontWeight: FontWeight.w400,
                                   color:
                                       enabled ? null : const Color(0xffb0b8b0),
                                 ),
                               ),
                             ),
-                            if (isAlwaysOn)
-                              const Padding(
-                                padding: EdgeInsets.only(right: 4),
-                                child: Text('始终启用',
-                                    style: TextStyle(
-                                        fontSize: 11,
-                                        color: Color(0xff8d948b))),
-                              )
-                            else
-                              SizedBox(
-                                height: 32,
-                                child: Switch(
-                                  value: enabled,
-                                  onChanged: disabled
-                                      ? null
-                                      : (value) => onToggleSource(key, value),
-                                ),
+                            SizedBox(
+                              height: 32,
+                              child: Switch(
+                                value: enabled,
+                                onChanged: disabled
+                                    ? null
+                                    : (value) => onToggleSource(key, value),
                               ),
+                            ),
                           ],
                         ),
                       );

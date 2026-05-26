@@ -9,18 +9,20 @@ class HeaderBar extends StatelessWidget {
     required this.canRun,
     required this.runState,
     required this.onRun,
+    required this.onOpenFile,
   });
 
   final bool canRun;
   final RunState runState;
   final VoidCallback onRun;
+  final VoidCallback onOpenFile;
 
   @override
   Widget build(BuildContext context) {
     final running = runState == RunState.running;
     return Container(
       height: 76,
-      padding: const EdgeInsets.symmetric(horizontal: 20),
+      padding: const EdgeInsets.fromLTRB(16, 10, 20, 10),
       decoration: const BoxDecoration(
         color: Colors.white,
         border: Border(bottom: BorderSide(color: Color(0xffd9ded6))),
@@ -45,10 +47,16 @@ class HeaderBar extends StatelessWidget {
                     _VersionBadge(version: appVersion),
                   ],
                 ),
-                Text('BibTeX / DOCX AI 幻觉引用与元数据核验'),
+                Text('BibTeX / DOCX 引用与元数据核验'),
               ],
             ),
           ),
+          OutlinedButton.icon(
+            onPressed: running ? null : onOpenFile,
+            icon: const Icon(Icons.upload_file_outlined),
+            label: const Text('选择文件'),
+          ),
+          const SizedBox(width: 8),
           FilledButton.icon(
             onPressed: canRun ? onRun : null,
             icon: running

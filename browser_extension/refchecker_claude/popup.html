@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>RefChecker</title>
+  <style>
+    body {
+      width: 360px;
+      margin: 0;
+      padding: 14px;
+      font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      color: #1c2622;
+      background: #fbfcfa;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 17px;
+    }
+    label {
+      display: block;
+      margin: 10px 0 4px;
+      color: #52615a;
+    }
+    input,
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #cfd8cf;
+      border-radius: 8px;
+      padding: 7px 8px;
+      font: inherit;
+      background: #fff;
+    }
+    textarea {
+      min-height: 72px;
+      resize: vertical;
+      line-height: 1.45;
+    }
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 10px 0 4px;
+      color: #52615a;
+    }
+    .switch-row span {
+      flex: 1;
+    }
+    .switch-row input {
+      width: auto;
+      transform: scale(1.1);
+      accent-color: #1f7a6d;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    button {
+      flex: 1;
+      cursor: pointer;
+      border: 1px solid #1f7a6d;
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #1f7a6d;
+      color: #fff;
+      font: inherit;
+    }
+    button.secondary {
+      background: #fff;
+      color: #1f7a6d;
+    }
+    .source-help {
+      margin: 4px 0 8px;
+      color: #667166;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .source-toolbar {
+      display: flex;
+      gap: 6px;
+      margin: 6px 0 8px;
+    }
+    .source-toolbar button {
+      flex: none;
+      padding: 5px 8px;
+      border-color: #cfd8cf;
+      background: #fff;
+      color: #1f7a6d;
+      font-size: 12px;
+    }
+    .source-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin: 4px 0 6px;
+    }
+    .source-chip {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      width: auto;
+      border: 1px solid #cfd8cf;
+      border-radius: 999px;
+      padding: 6px 9px;
+      background: #fff;
+      color: #35413b;
+      font-size: 12px;
+    }
+    .source-chip.selected {
+      border-color: #1f7a6d;
+      background: #e9f7ef;
+      color: #15584d;
+      font-weight: 650;
+    }
+    .source-chip .order {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      background: #1f7a6d;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    #sourceSummary {
+      color: #52615a;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    #status {
+      min-height: 18px;
+      margin-top: 10px;
+      color: #52615a;
+    }
+    .hint {
+      margin-top: 10px;
+      color: #667166;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    code {
+      font-family: "Cascadia Mono", Consolas, monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>RefChecker</h1>
+  <label class="switch-row">
+    <span>选中文本后显示绿色浮动按钮</span>
+    <input id="enableFloatButton" type="checkbox">
+  </label>
+
+  <label for="serverUrl">本地服务地址</label>
+  <input id="serverUrl" placeholder="http://127.0.0.1:8765">
+
+  <label for="threshold">标题相似度阈值</label>
+  <input id="threshold" type="number" min="0" max="1" step="0.01">
+
+  <label>数据源优先级（可选）</label>
+  <div class="source-help">点击标签选择/取消；标签上的数字就是查询优先级。Springer、IEEE、CORE 需要先配置 API Key。</div>
+  <div class="source-toolbar">
+    <button id="recommendedSources" type="button">推荐组合</button>
+    <button id="allSources" type="button">全部来源</button>
+  </div>
+  <div id="sourceChips" class="source-chips"></div>
+  <div id="sourceSummary"></div>
+
+  <label for="outputDir">输出目录（可选）</label>
+  <input id="outputDir" placeholder="C:\tmp\refchecker_out">
+
+  <label for="pastedLinks">粘贴链接核查</label>
+  <textarea id="pastedLinks" placeholder="请粘贴复制到的完整 URL / DOI，例如：https://doi.org/10.xxxx/xxxxx。短标签（arXiv / PNAS）不再自动识别。"></textarea>
+
+  <label for="pastedContext">页面显示标题/作者（可选）</label>
+  <textarea id="pastedContext" placeholder="如果要判断“链接是否指向另一篇论文”，请粘贴 AI 页面显示的论文标题、作者或附近上下文。留空时只会尝试使用当前选中的普通文本作为上下文，不会自动读取隐藏链接。"></textarea>
+
+  <div class="row">
+    <button id="checkPasted">核查粘贴链接</button>
+    <button id="checkSelection" class="secondary">核查选中文本</button>
+  </div>
+  <div class="row">
+    <button id="health" class="secondary">测试连接</button>
+  </div>
+  <div id="status"></div>
+  <div class="hint">
+    打开 RefChecker 桌面版会自动启动本地服务；也可手动启动：<code>python .\refchecker_http_server.py</code><br>
+    推荐用法：链接问题请右键复制完整 URL/DOI，粘贴后点“核查粘贴链接”；选中文本只核查完整参考文献正文，不再自动识别 arXiv / PNAS 这类短标签或隐藏链接。
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 
 import 'models.dart';
 import 'utils.dart';
+import 'app_info.dart';
 import 'widgets/header_bar.dart';
 import 'widgets/control_panel.dart';
 import 'widgets/results_panel.dart';
@@ -64,11 +65,14 @@ class RefCheckerHomePage extends StatefulWidget {
 
 class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   static const _nativeDialogs = MethodChannel('refchecker/native_dialogs');
+  static const _httpServerHost = '127.0.0.1';
+  static const _httpServerPort = 8765;
 
   final _emailController = TextEditingController();
   final _textController = TextEditingController();
   double _threshold = 0.85;
   double _delay = defaultDelaySeconds;
+  bool _useCrossref = true;
   bool _useOpenAlex = true;
   bool _useSemanticScholar = true;
   bool _useArxiv = true;
@@ -289,7 +293,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   }
 
   bool _isSourceEnabled(String key) => switch (key) {
-        'crossref' => true,
+        'crossref' => _useCrossref,
         'openalex' => _useOpenAlex,
         'semantic-scholar' => _useSemanticScholar,
         'arxiv' => _useArxiv,
@@ -307,6 +311,8 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
 
   void _setSourceEnabled(String key, bool value) {
     switch (key) {
+      case 'crossref':
+        _useCrossref = value;
       case 'openalex':
         _useOpenAlex = value;
       case 'semantic-scholar':
@@ -351,6 +357,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   IOSink? _logSink;
   String _logPath = '';
   Process? _process;
+  Process? _httpServerProcess;
   bool get _testingApiKeys => _testingApiSourceIds.isNotEmpty;
 
   bool get _canRun =>
@@ -374,7 +381,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     super.initState();
     _emailController.addListener(_scheduleSaveSettings);
     _textController.addListener(_scheduleSaveSettings);
-    _loadSettings();
+    unawaited(_loadSettings().then((_) => _ensureHttpServerStarted()));
   }
 
   @override
@@ -389,6 +396,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     unawaited(_logSink?.flush());
     unawaited(_logSink?.close());
     _process?.kill();
+    _httpServerProcess?.kill();
     super.dispose();
   }
 
@@ -437,6 +445,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         _threshold = settings.threshold;
         _delay = clampDelaySeconds(settings.delay);
         _emailController.text = settings.email;
+        _useCrossref = settings.useCrossref;
         _useOpenAlex = settings.useOpenAlex;
         _useSemanticScholar = settings.useSemanticScholar;
         _useArxiv = settings.useArxiv;
@@ -550,7 +559,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   void _deselectAllSources() {
     setState(() {
       for (final key in _visibleSourceOrder()) {
-        _setSourceEnabled(key, key == 'crossref');
+        _setSourceEnabled(key, false);
       }
     });
     _scheduleSaveSettings();
@@ -748,6 +757,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
       sources: sourceKey,
       sourceOrder: [sourceKey],
       customApiSources: [source],
+      useCrossref: false,
       useOpenAlex: false,
       useSemanticScholar: false,
       useArxiv: false,
@@ -878,6 +888,15 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
           });
           _appendLog(_formatResultLog(result));
           break;
+        case 'entry_updated':
+          final result = EntryResult.fromJson(decoded);
+          setState(() {
+            final index = _results.indexWhere((item) => item.key == result.key);
+            if (index >= 0) {
+              _results[index] = result;
+            }
+          });
+          break;
         case 'summary':
           setState(() {
             _summary = RunSummary.fromJson(decoded);
@@ -973,6 +992,119 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         executable: _pythonExecutable(), scriptPath: scriptPath);
   }
 
+  Future<BackendCommand> _httpServerCommand() async {
+    final appDir = File(Platform.resolvedExecutable).parent.path;
+    final executableName = Platform.isWindows
+        ? 'refchecker_http_server.exe'
+        : 'refchecker_http_server';
+    final candidates = <String>[
+      p.join(appDir, executableName),
+      p.join(appDir, 'backend', executableName),
+      p.join(Directory.current.path, 'backend', executableName),
+    ];
+    if (Platform.isMacOS) {
+      candidates.add(p.normalize(
+          p.join(appDir, '..', 'Resources', 'backend', executableName)));
+      candidates
+          .add(p.normalize(p.join(appDir, '..', 'Resources', executableName)));
+    }
+    for (final candidate in candidates) {
+      if (await File(candidate).exists()) {
+        return BackendCommand(executable: candidate);
+      }
+    }
+    final devScript = p.join(Directory.current.path, 'refchecker_http_server.py');
+    final bundledScript = p.join(appDir, 'refchecker_http_server.py');
+    final scriptPath =
+        await File(devScript).exists() ? devScript : bundledScript;
+    return BackendCommand(
+        executable: _pythonExecutable(), scriptPath: scriptPath);
+  }
+
+  Future<void> _ensureHttpServerStarted() async {
+    if (_httpServerProcess != null) {
+      return;
+    }
+    if (await _isHttpServerHealthy()) {
+      _appendLog(
+          'Claude 网页版核查服务已在 http://$_httpServerHost:$_httpServerPort 运行');
+      return;
+    }
+    try {
+      final command = await _httpServerCommand();
+      final args = <String>[
+        if (command.scriptPath != null) command.scriptPath!,
+        '--host',
+        _httpServerHost,
+        '--port',
+        _httpServerPort.toString(),
+      ];
+      final settings = _settingsLoaded ? _currentSettings() : null;
+      final process = await Process.start(
+        command.executable,
+        args,
+        runInShell: false,
+        environment: _backendEnvironment(
+          settings: settings,
+          includeApiKeys: settings != null,
+        ),
+      );
+      _httpServerProcess = process;
+      _appendLog(
+          '已自动启动 Claude 网页版核查服务：http://$_httpServerHost:$_httpServerPort');
+      unawaited(_listenHttpServerStream(process.stdout));
+      unawaited(_listenHttpServerStream(process.stderr));
+      unawaited(process.exitCode.then((exitCode) {
+        if (_httpServerProcess == process) {
+          _httpServerProcess = null;
+        }
+        if (mounted && exitCode != 0) {
+          _appendLog('Claude 网页版核查服务已退出，退出码：$exitCode');
+        }
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      if (!await _isHttpServerHealthy()) {
+        _appendLog('Claude 网页版核查服务正在启动；浏览器扩展稍后会自动连上');
+      }
+    } catch (error) {
+      _appendLog('Claude 网页版核查服务启动失败：$error');
+    }
+  }
+
+  Future<bool> _isHttpServerHealthy() async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 800);
+    try {
+      final request = await client.getUrl(
+        Uri.parse('http://$_httpServerHost:$_httpServerPort/health'),
+      );
+      final response =
+          await request.close().timeout(const Duration(seconds: 1));
+      await response.drain<void>();
+      return response.statusCode == HttpStatus.ok;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _listenHttpServerStream(Stream<List<int>> stream) {
+    return stream
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .transform(const LineSplitter())
+        .listen(
+      (line) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty || trimmed.contains('GET /health')) {
+          return;
+        }
+        _appendLog('网页核查服务：$trimmed');
+      },
+      onError: (Object error) => _appendLog('网页核查服务输出解码失败：$error'),
+    ).asFuture<void>();
+  }
+
   RunSettings _currentSettings() {
     return RunSettings(
       threshold: _threshold,
@@ -981,6 +1113,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
       sources: _visibleSourceOrder().where(_isSourceEnabled).join(','),
       sourceOrder: _completeSourceOrder(),
       customApiSources: _customApiSources.map((e) => e.toSource()).toList(),
+      useCrossref: _useCrossref,
       useOpenAlex: _useOpenAlex,
       useSemanticScholar: _useSemanticScholar,
       useArxiv: _useArxiv,
@@ -992,6 +1125,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
       useCore: _useCore && _customApiSourceEnabled('core'),
     );
   }
+
 
   Map<String, String> _backendEnvironment({
     RunSettings? settings,
@@ -1109,6 +1243,8 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
       settings.threshold.toStringAsFixed(2),
       '--delay',
       clampDelaySeconds(settings.delay).toStringAsFixed(2),
+      '--app-version',
+      appVersion,
     ]);
     if (settings.email.isNotEmpty) {
       args.addAll(['--email', settings.email]);
@@ -1125,6 +1261,9 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         const JsonEncoder.withIndent('  ').convert(customRestProfiles),
       );
       args.addAll(['--custom-rest-profiles', profilesPath]);
+    }
+    if (!settings.useCrossref) {
+      args.add('--no-crossref');
     }
     if (!settings.useOpenAlex) {
       args.add('--no-openalex');
@@ -1376,6 +1515,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
               canRun: _canRun,
               runState: _runState,
               onRun: _startRun,
+              onOpenFile: _pickBibFile,
             ),
             Expanded(
               child: LayoutBuilder(

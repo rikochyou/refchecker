@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""RefChecker — AI 幻觉引用与参考文献元数据核验 (向后兼容包装器)。
+"""Backward-compatible wrapper for the RefChecker backend package."""
 
-本文件从 refchecker/ 包重新导出所有公共 API，
-保持 `import check_bib_crossref` 的向后兼容性。
-"""
-
-# ——— 标准库 re-export（测试直接在 backend 命名空间中使用 requests）———
+# Standard-library / third-party symbols kept for compatibility with tests and older imports.
 import requests  # noqa: F401
 
-# ——— 文本工具 ———
 from refchecker.utils import (  # noqa: F401, E402
     NAME_PARTICLES,
     NAME_SUFFIXES,
@@ -22,8 +17,6 @@ from refchecker.utils import (  # noqa: F401, E402
     title_similarity,
     truncate,
 )
-
-# ——— 作者解析与比较 ———
 from refchecker.author import (  # noqa: F401, E402
     author_display_list,
     author_matches,
@@ -36,8 +29,6 @@ from refchecker.author import (  # noqa: F401, E402
     parse_author_name,
     split_bibtex_author_field,
 )
-
-# ——— 数据源搜索 ———
 from refchecker.sources import (  # noqa: F401, E402
     arxiv_author_list,
     build_arxiv_result,
@@ -68,8 +59,6 @@ from refchecker.sources import (  # noqa: F401, E402
     semantic_scholar_author_list,
     springer_author_list,
 )
-
-# ——— URL 验证 ———
 from refchecker.url_verify import (  # noqa: F401, E402
     detect_url_platform,
     verify_general_url,
@@ -77,8 +66,6 @@ from refchecker.url_verify import (  # noqa: F401, E402
     verify_huggingface,
     verify_url_resource,
 )
-
-# ——— 核验引擎 + 评估 + 报告 ———
 from refchecker.verifier import (  # noqa: F401, E402
     CONFIDENCE_EXPLANATION,
     CONFIDENCE_SCALE,
@@ -100,23 +87,17 @@ from refchecker.verifier import (  # noqa: F401, E402
     write_csv_report,
     write_markdown_report,
 )
-
-# ——— DOCX / APA 解析 ———
 from refchecker.docx_parser import (  # noqa: F401, E402
     _apa_authors_to_bibtex,
     extract_references_from_docx,
     parse_reference_text,
     parse_text_references,
 )
-
-# ——— 批量处理 ———
 from refchecker.batch import (  # noqa: F401, E402
     verify_bib_file,
     verify_docx_file,
     verify_text,
 )
-
-# ——— 源选择 + API Key 测试 ———
 from refchecker.config import (  # noqa: F401, E402
     API_KEY_TEST_QUERY,
     API_KEY_TEST_TIMEOUT,
@@ -130,13 +111,18 @@ from refchecker.config import (  # noqa: F401, E402
     test_ieee_api_key,
     test_springer_api_key,
 )
+from refchecker.citation_consistency import (  # noqa: F401, E402
+    check_citation_consistency,
+    check_docx_citation_consistency,
+    check_text_citation_consistency,
+    extract_body_citations,
+    split_docx_body_and_references,
+    split_text_body_and_references,
+)
+from refchecker.version import APP_VERSION  # noqa: F401, E402
 
-# ——— 模块引用（测试 monkeypatch 需要）———
-from refchecker import verifier, sources, url_verify, batch  # noqa: F401, E402
-
-# ——— CLI ———
+from refchecker import verifier, sources, url_verify, batch, citation_consistency  # noqa: F401, E402
 from refchecker.cli import main  # noqa: F401, E402
-
 
 if __name__ == "__main__":
     main()

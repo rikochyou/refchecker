@@ -75,6 +75,25 @@ The old CLI options still work, including `--output`, `--csv`, `--threshold`, `-
 
 ## Packaging
 
+Recommended one-command Windows package:
+
+```powershell
+.\tool\package_windows.ps1 -Version 1.2.0-beta.1
+```
+
+The script will:
+
+1. install/confirm Python backend dependencies,
+2. rebuild `backend/refchecker_backend.exe` with PyInstaller,
+3. run `flutter build windows --release --dart-define APP_VERSION=...`,
+4. assemble a portable directory under `dist_portable/`,
+5. create a matching `.zip`,
+6. run a backend smoke test against the packaged executable.
+
+The app header, backend report, JSONL summary, and package manifest should use the same version string.
+
+### Manual packaging
+
 Build the Python backend first:
 
 ```powershell
@@ -90,7 +109,7 @@ This creates `backend/refchecker_backend.exe`. For macOS, run the same script on
 Then build Flutter:
 
 ```powershell
-flutter build windows --release --dart-define APP_VERSION=1.1.0+2
+flutter build windows --release --dart-define APP_VERSION=1.2.0-beta.1
 ```
 
 For release packaging, copy the `backend` folder next to the built app executable so the runtime layout is:
