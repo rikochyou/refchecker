@@ -67,7 +67,7 @@ def build_source_order(selection: list[str] | None, extra_sources: list[str] | N
 
 
 def source_selected(selection: list[str] | None, name: str, default: bool = True) -> bool:
-    return default if selection is None else (name in selection or default)
+    return default if selection is None else name in selection
 
 
 API_KEY_TEST_QUERY = "machine learning"

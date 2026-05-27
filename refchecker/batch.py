@@ -16,10 +16,11 @@ except Exception:
 
 import bibtexparser
 
-from .utils import strip_latex, truncate
+from .utils import strip_latex, truncate, clean_doi
 from . import verifier as _verifier
 from . import citation_consistency as _citation_consistency
 from .docx_parser import extract_references_from_docx, parse_text_references
+from .llm_parser import apply_llm_parsing, normalize_llm_parse_mode
 from .version import APP_VERSION
 
 SAFE_MIN_DELAY_SECONDS = 0.5
@@ -126,6 +127,63 @@ def _log_summary(log, summary: dict, counts: dict) -> None:
             log(f"   ... {len(summary['author_mismatch']) - 30} more; see report/CSV")
 
 
+def _run_trace_summary(results: list[dict], *, fallback_search_mode: str = "strict") -> dict:
+    first = results[0] if results else {}
+    doi_statuses: dict[str, int] = {}
+    for row in results:
+        status = row.get("doi_check_status") or "not_provided"
+        doi_statuses[status] = doi_statuses.get(status, 0) + 1
+    if not doi_statuses:
+        doi_summary = "not_provided"
+    elif len(doi_statuses) == 1:
+        doi_summary = next(iter(doi_statuses))
+    else:
+        doi_summary = ", ".join(f"{key}:{value}" for key, value in sorted(doi_statuses.items()))
+    parser_counts: dict[str, int] = {}
+    for row in results:
+        parser = row.get("parser") or "rules"
+        parser_counts[parser] = parser_counts.get(parser, 0) + 1
+    parser_summary = ", ".join(f"{key}:{value}" for key, value in sorted(parser_counts.items()))
+    return {
+        "search_mode": first.get("search_mode", fallback_search_mode),
+        "source_order": first.get("source_order", ""),
+        "actual_query_trace": first.get("actual_query_trace", ""),
+        "doi_check_status": doi_summary,
+        "doi_resolved_url": first.get("doi_resolved_url", ""),
+        "llm_parse_mode": first.get("llm_parse_mode", "off"),
+        "parser_summary": parser_summary,
+    }
+
+
+def _apply_optional_llm_parsing(
+    refs: list[dict],
+    *,
+    llm_parse_mode: str,
+    llm_provider: str,
+    llm_model: str,
+    llm_base_url: str,
+    llm_api_key: str,
+    log,
+) -> list[dict]:
+    mode = normalize_llm_parse_mode(llm_parse_mode)
+    try:
+        parsed = apply_llm_parsing(
+            refs,
+            llm_parse_mode=mode,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
+            log=log,
+        )
+    except Exception as exc:
+        log(f"LLM assisted parsing failed; kept rule parser output ({type(exc).__name__}: {exc})")
+        parsed = [{**ref, "parser": ref.get("parser") or "rules", "parser_warning": f"LLM parsing failed: {type(exc).__name__}: {exc}"} for ref in refs]
+    for ref in parsed:
+        ref["llm_parse_mode"] = mode
+    return parsed
+
+
 def _verify_reference_rows(
     refs: list[dict],
     *,
@@ -147,6 +205,8 @@ def _verify_reference_rows(
     use_url_verify: bool,
     source_order: list[str] | None,
     custom_rest_profiles: list[dict] | None,
+    search_mode: str,
+    doi_check: str,
     log,
     event,
 ) -> list[dict]:
@@ -154,19 +214,37 @@ def _verify_reference_rows(
     results: list[dict] = []
     for i, ref in enumerate(refs, 1):
         key = str(ref.get("key") or f"ref[{ref.get('paragraph', i)}]")
-        title_clean = strip_latex(ref.get("title", "") or ref.get("text", ""))
         author = ref.get("authors", "")
         year = ref.get("year", "")
         doi = ref.get("doi", "")
         ref_url = ref.get("url", "")
+        raw_title = ref.get("title", "")
+        # If the parser intentionally left title empty for DOI/URL-only input,
+        # do not fall back to the raw text; a locator is not a title.
+        title_clean = strip_latex(raw_title or ("" if doi or ref_url else ref.get("text", "")))
+        if not title_clean and doi and not ref_url:
+            cleaned_doi = clean_doi(doi)
+            if cleaned_doi:
+                ref_url = f"https://doi.org/{cleaned_doi}"
 
         log(f"[{i}/{total}] {key}")
         log(f"    Title: {truncate(title_clean, 90)}")
         event("entry_started", index=i, total=total, key=key, title=title_clean)
 
-        if not title_clean:
-            log("    Skipped: title could not be extracted\n")
-            row = {"key": key, "title": "", "status": "skipped", "reason": "missing title", "needs_review": "Yes"}
+        if not title_clean and not doi and not ref_url:
+            log("    Skipped: title/DOI/URL could not be extracted\n")
+            row = {
+                "key": key,
+                "title": "",
+                "status": "skipped",
+                "reason": "missing title/DOI/URL",
+                "needs_review": "Yes",
+                "parser": ref.get("parser", ""),
+                "parser_note": ref.get("parser_note", ""),
+                "parser_confidence": ref.get("parser_confidence", ""),
+                "parser_warning": ref.get("parser_warning", ""),
+                "llm_parse_mode": ref.get("llm_parse_mode", "off"),
+            }
             _verifier.apply_product_assessment(row)
             results.append(row)
             event("entry_finished", index=i, total=total, result=_verifier.printable_result(row))
@@ -195,6 +273,8 @@ def _verify_reference_rows(
             use_url_verify=use_url_verify,
             source_order=source_order,
             custom_rest_profiles=custom_rest_profiles,
+            search_mode=search_mode,
+            doi_check=doi_check,
         )
         if res.get("found"):
             res["status"] = "found"
@@ -222,7 +302,17 @@ def _verify_reference_rows(
         if res.get("doi_check") == "mismatch":
             log(f"        DOI : {_verifier.status_icon('mismatch')} {res.get('doi_reason', '')}")
 
-        row = {"key": key, "title": title_clean, **res}
+        row = {
+            "key": key,
+            "title": title_clean,
+            "bib_url": ref_url,
+            "parser": ref.get("parser", ""),
+            "parser_note": ref.get("parser_note", ""),
+            "parser_confidence": ref.get("parser_confidence", ""),
+            "parser_warning": ref.get("parser_warning", ""),
+            "llm_parse_mode": ref.get("llm_parse_mode", "off"),
+            **res,
+        }
         _verifier.apply_product_assessment(row)
         results.append(row)
         event("entry_finished", index=i, total=total, result=_verifier.printable_result(row))
@@ -245,12 +335,26 @@ def _finalize_run(
     sources: str,
     threshold: float,
     app_version: str,
+    search_mode: str,
     log,
     event,
 ) -> dict:
     summary = _verifier.build_summary(results)
     counts = _verifier.summary_counts(summary, total)
     counts.update(_citation_summary_fields(citation_consistency))
+    counts.update(_run_trace_summary(results, fallback_search_mode=search_mode))
+    summary.update({
+        key: counts.get(key, "")
+        for key in [
+            "search_mode",
+            "source_order",
+            "actual_query_trace",
+            "doi_check_status",
+            "doi_resolved_url",
+            "llm_parse_mode",
+            "parser_summary",
+        ]
+    })
     counts["report_summary"] = _verifier.build_report_summary(results, counts, citation_consistency)
 
     _log_summary(log, summary, counts)
@@ -299,10 +403,17 @@ def verify_text(text: str, *, threshold: float = 0.85, delay: float = SAFE_MIN_D
                 use_ieee: bool = False, use_core: bool = False,
                 springer_api_key: str = "", ieee_api_key: str = "",
                 core_api_key: str = "",
-                use_url_verify: bool = True,
-                source_order: list[str] | None = None,
-                custom_rest_profiles: list[dict] | None = None,
-                app_version: str = APP_VERSION,
+                 use_url_verify: bool = True,
+                 source_order: list[str] | None = None,
+                 custom_rest_profiles: list[dict] | None = None,
+                 search_mode: str = "strict",
+                 doi_check: str = "auto",
+                 llm_parse_mode: str = "off",
+                 llm_provider: str = "openai-compatible",
+                 llm_model: str = "",
+                 llm_base_url: str = "",
+                 llm_api_key: str = "",
+                 app_version: str = APP_VERSION,
                 output: str | None = None, csv_path: str | None = None,
                 output_dir: str | None = None, jsonl_progress: bool = False,
                 human_output: bool = True) -> dict:
@@ -325,6 +436,15 @@ def verify_text(text: str, *, threshold: float = 0.85, delay: float = SAFE_MIN_D
 
     text_split = _citation_consistency.split_text_body_and_references(text)
     refs = text_split["references"] if text_split.get("has_reference_section") else parse_text_references(text)
+    refs = _apply_optional_llm_parsing(
+        refs,
+        llm_parse_mode=llm_parse_mode,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        log=log,
+    )
     total = len(refs)
     sources = _source_label(
         use_crossref=use_crossref,
@@ -342,8 +462,10 @@ def verify_text(text: str, *, threshold: float = 0.85, delay: float = SAFE_MIN_D
         use_dblp=use_dblp,
         use_url_verify=use_url_verify,
     )
-    log(f"Parsed {total} references from text; starting verification ({sources}, title threshold {threshold:.0%})\n")
+    llm_mode = normalize_llm_parse_mode(llm_parse_mode)
+    log(f"Parsed {total} references from text; starting verification ({sources}, title threshold {threshold:.0%}, mode {search_mode}, DOI {doi_check}, parser {llm_mode})\n")
     event("started", total=total, sources=sources, threshold=threshold,
+          search_mode=search_mode, doi_check=doi_check, llm_parse_mode=llm_mode,
           use_openalex=use_openalex, use_dblp=use_dblp,
           use_semantic_scholar=use_semantic_scholar, use_arxiv=use_arxiv,
           use_pubmed=use_pubmed, use_crossref=use_crossref,
@@ -372,6 +494,8 @@ def verify_text(text: str, *, threshold: float = 0.85, delay: float = SAFE_MIN_D
         use_url_verify=use_url_verify,
         source_order=source_order,
         custom_rest_profiles=custom_rest_profiles,
+        search_mode=search_mode,
+        doi_check=doi_check,
         log=log,
         event=event,
     )
@@ -391,6 +515,7 @@ def verify_text(text: str, *, threshold: float = 0.85, delay: float = SAFE_MIN_D
         sources=sources,
         threshold=threshold,
         app_version=app_version,
+        search_mode=search_mode,
         log=log,
         event=event,
     )
@@ -404,10 +529,17 @@ def verify_docx_file(docx_path: str, *, threshold: float = 0.85, delay: float = 
                      use_ieee: bool = False, use_core: bool = False,
                      springer_api_key: str = "", ieee_api_key: str = "",
                      core_api_key: str = "",
-                     use_url_verify: bool = True,
-                     source_order: list[str] | None = None,
-                     custom_rest_profiles: list[dict] | None = None,
-                     app_version: str = APP_VERSION,
+                      use_url_verify: bool = True,
+                      source_order: list[str] | None = None,
+                      custom_rest_profiles: list[dict] | None = None,
+                      search_mode: str = "strict",
+                      doi_check: str = "auto",
+                      llm_parse_mode: str = "off",
+                      llm_provider: str = "openai-compatible",
+                      llm_model: str = "",
+                      llm_base_url: str = "",
+                      llm_api_key: str = "",
+                      app_version: str = APP_VERSION,
                      output: str | None = None, csv_path: str | None = None,
                      output_dir: str | None = None, jsonl_progress: bool = False,
                      human_output: bool = True) -> dict:
@@ -429,6 +561,15 @@ def verify_docx_file(docx_path: str, *, threshold: float = 0.85, delay: float = 
         csv_path = csv_path or os.path.join(output_dir, "result.csv")
 
     refs = extract_references_from_docx(docx_path)
+    refs = _apply_optional_llm_parsing(
+        refs,
+        llm_parse_mode=llm_parse_mode,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        log=log,
+    )
     total = len(refs)
     sources = _source_label(
         use_crossref=use_crossref,
@@ -446,8 +587,10 @@ def verify_docx_file(docx_path: str, *, threshold: float = 0.85, delay: float = 
         use_dblp=use_dblp,
         use_url_verify=use_url_verify,
     )
-    log(f"Parsed {total} references from DOCX; starting verification ({sources}, title threshold {threshold:.0%})\n")
+    llm_mode = normalize_llm_parse_mode(llm_parse_mode)
+    log(f"Parsed {total} references from DOCX; starting verification ({sources}, title threshold {threshold:.0%}, mode {search_mode}, DOI {doi_check}, parser {llm_mode})\n")
     event("started", total=total, sources=sources, threshold=threshold,
+          search_mode=search_mode, doi_check=doi_check, llm_parse_mode=llm_mode,
           use_openalex=use_openalex, use_dblp=use_dblp,
           use_semantic_scholar=use_semantic_scholar, use_arxiv=use_arxiv,
           use_pubmed=use_pubmed, use_crossref=use_crossref,
@@ -476,6 +619,8 @@ def verify_docx_file(docx_path: str, *, threshold: float = 0.85, delay: float = 
         use_url_verify=use_url_verify,
         source_order=source_order,
         custom_rest_profiles=custom_rest_profiles,
+        search_mode=search_mode,
+        doi_check=doi_check,
         log=log,
         event=event,
     )
@@ -494,6 +639,7 @@ def verify_docx_file(docx_path: str, *, threshold: float = 0.85, delay: float = 
         sources=sources,
         threshold=threshold,
         app_version=app_version,
+        search_mode=search_mode,
         log=log,
         event=event,
     )
@@ -510,6 +656,13 @@ def verify_bib_file(bibfile: str, *, threshold: float = 0.85, delay: float = SAF
                     use_url_verify: bool = True,
                     source_order: list[str] | None = None,
                     custom_rest_profiles: list[dict] | None = None,
+                    search_mode: str = "strict",
+                    doi_check: str = "auto",
+                    llm_parse_mode: str = "off",
+                    llm_provider: str = "openai-compatible",
+                    llm_model: str = "",
+                    llm_base_url: str = "",
+                    llm_api_key: str = "",
                     app_version: str = APP_VERSION,
                     output: str | None = None, csv_path: str | None = None,
                     output_dir: str | None = None, jsonl_progress: bool = False,
@@ -558,6 +711,8 @@ def verify_bib_file(bibfile: str, *, threshold: float = 0.85, delay: float = SAF
             "year": entry.get("year", ""),
             "doi": entry.get("doi", "") or entry.get("DOI", ""),
             "url": url,
+            "parser": "bibtex",
+            "llm_parse_mode": "off",
         })
 
     total = len(refs)
@@ -577,8 +732,9 @@ def verify_bib_file(bibfile: str, *, threshold: float = 0.85, delay: float = SAF
         use_dblp=use_dblp,
         use_url_verify=use_url_verify,
     )
-    log(f"Parsed {total} BibTeX entries; starting verification ({sources}, title threshold {threshold:.0%})\n")
+    log(f"Parsed {total} BibTeX entries; starting verification ({sources}, title threshold {threshold:.0%}, mode {search_mode}, DOI {doi_check})\n")
     event("started", total=total, sources=sources, threshold=threshold,
+          search_mode=search_mode, doi_check=doi_check,
           use_openalex=use_openalex, use_dblp=use_dblp,
           use_semantic_scholar=use_semantic_scholar, use_arxiv=use_arxiv,
           use_pubmed=use_pubmed, use_crossref=use_crossref,
@@ -607,6 +763,8 @@ def verify_bib_file(bibfile: str, *, threshold: float = 0.85, delay: float = SAF
         use_url_verify=use_url_verify,
         source_order=source_order,
         custom_rest_profiles=custom_rest_profiles,
+        search_mode=search_mode,
+        doi_check=doi_check,
         log=log,
         event=event,
     )
@@ -624,6 +782,7 @@ def verify_bib_file(bibfile: str, *, threshold: float = 0.85, delay: float = SAF
         sources=sources,
         threshold=threshold,
         app_version=app_version,
+        search_mode=search_mode,
         log=log,
         event=event,
     )

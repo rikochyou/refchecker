@@ -1,0 +1,35 @@
+[
+  {
+    "id": "brave-search",
+    "name": "Brave Web Evidence",
+    "enabled": true,
+    "evidenceType": "web",
+    "endpoint": "https://api.search.brave.com/res/v1/web/search",
+    "method": "GET",
+    "authType": "header",
+    "apiKeyHeader": "X-Subscription-Token",
+    "apiKey": "",
+    "queryParams": {
+      "q": "\"{title}\" DOI scholarly article",
+      "count": "10",
+      "result_filter": "web",
+      "search_lang": "en",
+      "country": "US",
+      "safesearch": "moderate",
+      "text_decorations": "false"
+    },
+    "headers": {
+      "Accept": "application/json",
+      "Accept-Encoding": "gzip"
+    },
+    "resultsPath": "web.results",
+    "titlePath": "title",
+    "authorsPath": "",
+    "yearPath": "",
+    "doiPath": "",
+    "urlPath": "url",
+    "venuePath": "profile.name",
+    "typePath": "type",
+    "snippetPath": "description"
+  }
+]

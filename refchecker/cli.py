@@ -32,10 +32,25 @@ def main():
     parser.add_argument("--email", default="",
                         help="你的邮箱 (放进 User-Agent / mailto，访问 CrossRef/OpenAlex/NCBI 更稳)")
     parser.add_argument("--sources", default="",
-                        help="可选: 指定优先搜索的数据源及顺序，逗号分隔；未列出的数据源仍作为兜底。"
+                        help="可选: 指定搜索链数据源及顺序，逗号分隔；严格顺序模式会按此顺序逐个查询。"
                              "如 crossref,openalex,semantic-scholar,arxiv,pubmed,dblp,url,springer,ieee,core")
+    parser.add_argument("--search-mode", choices=["strict", "parallel"], default="strict",
+                        help="搜索模式：strict=严格顺序（默认），parallel=快速并发仲裁")
+    parser.add_argument("--doi-check", choices=["auto", "off"], default="auto",
+                        help="DOI 精确核验：auto=有 DOI 时先核验（默认），off=关闭")
+    parser.add_argument("--llm-parse-mode", choices=["off", "auto", "always"],
+                        default=os.getenv("REFCHECKER_LLM_PARSE_MODE", "off"),
+                        help="LLM field extraction: off=rules only (default); auto/always=LLM-first with rule fallback when the LLM cannot parse a field/row. The LLM only extracts fields and does not judge authenticity.")
+    parser.add_argument("--llm-provider", default=os.getenv("REFCHECKER_LLM_PROVIDER", "openai-compatible"),
+                        help="LLM 提供商；当前支持 openai-compatible。")
+    parser.add_argument("--llm-model", default=os.getenv("REFCHECKER_LLM_MODEL", "gpt-4o-mini"),
+                        help="LLM 模型名；也可用环境变量 REFCHECKER_LLM_MODEL。")
+    parser.add_argument("--llm-base-url", default=os.getenv("REFCHECKER_LLM_BASE_URL", "https://api.openai.com/v1"),
+                        help="OpenAI-compatible API base URL；也可用 REFCHECKER_LLM_BASE_URL。")
+    parser.add_argument("--llm-api-key", default=os.getenv("REFCHECKER_LLM_API_KEY", ""),
+                        help="LLM API Key；也可用环境变量 REFCHECKER_LLM_API_KEY。")
     parser.add_argument("--no-crossref", action="store_true",
-                        help="??? CrossRef??? CrossRef DOI ????")
+                        help="不使用 CrossRef 作为搜索链数据源；DOI 精确核验仍按 --doi-check 策略独立执行")
     parser.add_argument("--no-openalex", action="store_true",
                         help="不使用 OpenAlex 兜底")
     parser.add_argument("--no-semantic-scholar", action="store_true",
@@ -117,9 +132,16 @@ def main():
                         ieee_api_key=ieee_key,
                         core_api_key=core_key,
                         use_url_verify=source_selected(selected_sources, "url", True) and not args.no_url_verify,
-                        source_order=build_source_order(selected_sources, custom_source_keys),
-                        custom_rest_profiles=custom_rest_profiles,
-                        app_version=args.app_version,
+                         source_order=build_source_order(selected_sources, custom_source_keys),
+                         custom_rest_profiles=custom_rest_profiles,
+                         search_mode=args.search_mode,
+                         doi_check=args.doi_check,
+                         llm_parse_mode=args.llm_parse_mode,
+                         llm_provider=args.llm_provider,
+                         llm_model=args.llm_model,
+                         llm_base_url=args.llm_base_url,
+                         llm_api_key=args.llm_api_key,
+                         app_version=args.app_version,
                         output=args.output,
                         csv_path=args.csv,
                         output_dir=args.output_dir,
@@ -148,6 +170,13 @@ def main():
             use_url_verify=source_selected(selected_sources, "url", True) and not args.no_url_verify,
             source_order=build_source_order(selected_sources, custom_source_keys),
             custom_rest_profiles=custom_rest_profiles,
+            search_mode=args.search_mode,
+            doi_check=args.doi_check,
+            llm_parse_mode=args.llm_parse_mode,
+            llm_provider=args.llm_provider,
+            llm_model=args.llm_model,
+            llm_base_url=args.llm_base_url,
+            llm_api_key=args.llm_api_key,
             app_version=args.app_version,
             output=args.output,
             csv_path=args.csv,

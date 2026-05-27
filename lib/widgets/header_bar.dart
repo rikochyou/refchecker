@@ -8,13 +8,17 @@ class HeaderBar extends StatelessWidget {
     super.key,
     required this.canRun,
     required this.runState,
+    required this.cancelRequested,
     required this.onRun,
+    required this.onCancelRun,
     required this.onOpenFile,
   });
 
   final bool canRun;
   final RunState runState;
+  final bool cancelRequested;
   final VoidCallback onRun;
+  final VoidCallback onCancelRun;
   final VoidCallback onOpenFile;
 
   @override
@@ -58,15 +62,32 @@ class HeaderBar extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           FilledButton.icon(
-            onPressed: canRun ? onRun : null,
-            icon: running
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+            style: running
+                ? FilledButton.styleFrom(
+                    backgroundColor: const Color(0xffb42318),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: const Color(0xfff3b8b0),
+                    disabledForegroundColor: Colors.white,
                   )
+                : null,
+            onPressed: running
+                ? (cancelRequested ? null : onCancelRun)
+                : (canRun ? onRun : null),
+            icon: running
+                ? (cancelRequested
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.stop_circle_outlined))
                 : const Icon(Icons.play_arrow_rounded),
-            label: Text(running ? '校验中' : '开始校验'),
+            label: Text(
+              running ? (cancelRequested ? '正在停止...' : '终止任务') : '开始校验',
+            ),
           ),
         ],
       ),

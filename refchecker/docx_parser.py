@@ -6,6 +6,23 @@ from .utils import strip_latex
 
 # --------------------------- DOCX / APA 参考文献解析 ---------------------------
 
+def _is_locator_only_reference(text: str) -> bool:
+    """Return True when the pasted reference is only a DOI/URL locator.
+
+    A DOI/URL-only input is valid evidence, but it is not a bibliographic title.
+    Keeping it out of the title field prevents the UI from reporting a bogus
+    "title similarity 0%" comparison between a URL and a paper title.
+    """
+    value = (text or "").strip()
+    if not value:
+        return False
+    return bool(re.fullmatch(
+        r'(?:https?://[^\s"\'<>]+|doi\s*:\s*10\.\S+|10\.\d{4,9}/\S+)',
+        value,
+        flags=re.I,
+    ))
+
+
 def _apa_authors_to_bibtex(authors_text: str) -> str:
     """将 APA 格式作者列表转换为 BibTeX 兼容的 ' and ' 分隔格式。
 
@@ -38,7 +55,7 @@ def parse_reference_text(text: str) -> dict:
     """解析 APA 格式参考文献，提取 DOI、年份、作者、标题。"""
     original = text.strip()
     if not original:
-        return {"text": "", "title": "", "authors": "", "year": "", "doi": ""}
+        return {"text": "", "title": "", "authors": "", "year": "", "doi": "", "url": "", "parser": "rules"}
 
     # 1. 提取 DOI（URL 或 bare "doi: 10.xxx" 格式）
     doi = ""
@@ -47,6 +64,7 @@ def parse_reference_text(text: str) -> dict:
     for pat, doi_group in [
         (r'https?://(dx\.)?doi\.org/(10\.\S+)', 2),
         (r'\b[dD][oO][iI]\s*:\s*(10\.\S+)', 1),
+        (r'(?<![\w/])(10\.\d{4,9}/[^\s"\'<>]+)', 1),
     ]:
         m = re.search(pat, original)
         if m:
@@ -54,13 +72,22 @@ def parse_reference_text(text: str) -> dict:
             doi_start = m.start()
             break
     if doi_val:
-        doi = doi_val.rstrip('.;,')
+        doi = doi_val.rstrip('.;,，。；、)）]】}>')
         text_body = original[:doi_start].strip().rstrip('.').strip()
     else:
         text_body = original
 
     if not text_body:
         text_body = original
+    else:
+        # Remove a trailing non-DOI URL (for example arXiv links) before title
+        # boundary detection.  Keep URL-only inputs intact by applying this only
+        # when some bibliographic text remains before the URL.
+        text_body = re.sub(
+            r'\s+https?://[^\s"\'<>]+[.,;，。；、)）\]】}>]*\s*$',
+            '',
+            text_body,
+        ).strip()
 
     # 2. 提取年份: (YYYY)
     year = ""
@@ -93,8 +120,10 @@ def parse_reference_text(text: str) -> dict:
         journal_boundary = None
         for pat in [
             r',\s*\d+\s*\(\d+\)',           # ", 10(2)"  卷号(期号)
+            r',\s*\d+\.?\s*$',              # ", 30."     ??/volume only
             r',\s*\d+,\s*\d+',              # ", 5, 134" 卷号, 页码
             r',\s*\d+,\s*\d+[–\-]\d+',      # ", 5, 134–140" 卷号, 页码范围
+            r',\s*(?:pp\.?\s*)?\d+[–\-]\d+', # ", 4171-4186" 会议论文页码范围
         ]:
             m = re.search(pat, title)
             if m and (journal_boundary is None or m.start() < journal_boundary):
@@ -123,12 +152,17 @@ def parse_reference_text(text: str) -> dict:
                     if len(title_candidate) > 5:
                         title = title_candidate
 
+    url_match = re.search(r'https?://[^\s"\'<>]+', original)
+    url = url_match.group(0).rstrip('.;,，。；、)）]】}>') if url_match else ""
+
     return {
         "text": original,
-        "title": title or original,
+        "title": title or ("" if _is_locator_only_reference(original) else original),
         "authors": authors,
         "year": year,
         "doi": doi,
+        "url": url,
+        "parser": "rules",
     }
 
 

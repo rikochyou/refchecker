@@ -18,6 +18,28 @@ def test_mcp_initialize_and_tools_list():
     })
     names = {tool["name"] for tool in tools["result"]["tools"]}
     assert {"check_reference_file", "check_reference_text", "test_reference_api_keys"} <= names
+    text_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "check_reference_text")
+    assert "search_mode" in text_tool["inputSchema"]["properties"]
+    assert "doi_check" in text_tool["inputSchema"]["properties"]
+    assert "llm_parse_mode" in text_tool["inputSchema"]["properties"]
+
+
+def test_common_verify_kwargs_accepts_search_mode_and_doi_check():
+    kwargs = mcp_server._common_verify_kwargs({
+        "sources": "openalex,crossref",
+        "search_mode": "parallel",
+        "doi_check": "off",
+        "llm_parse_mode": "auto",
+        "llm_model": "test-model",
+    })
+    assert kwargs["search_mode"] == "parallel"
+    assert kwargs["doi_check"] == "off"
+    assert kwargs["llm_parse_mode"] == "auto"
+    assert kwargs["llm_model"] == "test-model"
+    assert kwargs["source_order"][:2] == ["openalex", "crossref"]
+    assert kwargs["use_openalex"] is True
+    assert kwargs["use_crossref"] is True
+    assert kwargs["use_semantic_scholar"] is False
 
 
 def test_mcp_check_reference_file_tool(tmp_path, monkeypatch):

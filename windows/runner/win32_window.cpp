@@ -2,6 +2,7 @@
 
 #include <dwmapi.h>
 #include <flutter_windows.h>
+#include <shellapi.h>
 
 #include "resource.h"
 
@@ -25,6 +26,12 @@ constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 constexpr const wchar_t kGetPreferredBrightnessRegKey[] =
   L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme";
+
+constexpr UINT kTrayIconId = 1;
+constexpr UINT kTrayIconMessage = WM_APP + 1;
+constexpr UINT kTrayMenuShow = 1001;
+constexpr UINT kTrayMenuExit = 1002;
+constexpr const wchar_t kTrayTooltip[] = L"RefChecker";
 
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
@@ -179,13 +186,47 @@ Win32Window::MessageHandler(HWND hwnd,
                             WPARAM const wparam,
                             LPARAM const lparam) noexcept {
   switch (message) {
+    case WM_CLOSE:
+      if (!force_close_) {
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+      }
+      break;
+
     case WM_DESTROY:
+      RemoveTrayIcon();
       window_handle_ = nullptr;
       Destroy();
       if (quit_on_close_) {
         PostQuitMessage(0);
       }
       return 0;
+
+    case kTrayIconMessage:
+      switch (LOWORD(lparam)) {
+        case WM_LBUTTONUP:
+        case WM_LBUTTONDBLCLK:
+          RestoreFromTray();
+          return 0;
+        case WM_RBUTTONUP:
+        case WM_CONTEXTMENU:
+          ShowTrayMenu();
+          return 0;
+      }
+      return 0;
+
+    case WM_COMMAND:
+      switch (LOWORD(wparam)) {
+        case kTrayMenuShow:
+          RestoreFromTray();
+          return 0;
+        case kTrayMenuExit:
+          force_close_ = true;
+          RemoveTrayIcon();
+          DestroyWindow(hwnd);
+          return 0;
+      }
+      break;
 
     case WM_DPICHANGED: {
       auto newRectSize = reinterpret_cast<RECT*>(lparam);
@@ -264,12 +305,12 @@ void Win32Window::SetQuitOnClose(bool quit_on_close) {
 }
 
 bool Win32Window::OnCreate() {
-  // No-op; provided for subclasses.
+  AddTrayIcon();
   return true;
 }
 
 void Win32Window::OnDestroy() {
-  // No-op; provided for subclasses.
+  RemoveTrayIcon();
 }
 
 void Win32Window::UpdateTheme(HWND const window) {
@@ -284,5 +325,84 @@ void Win32Window::UpdateTheme(HWND const window) {
     BOOL enable_dark_mode = light_mode == 0;
     DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
                           &enable_dark_mode, sizeof(enable_dark_mode));
+  }
+}
+
+void Win32Window::AddTrayIcon() {
+  if (tray_icon_added_ || window_handle_ == nullptr) {
+    return;
+  }
+
+  NOTIFYICONDATAW notify_icon_data = {};
+  notify_icon_data.cbSize = sizeof(notify_icon_data);
+  notify_icon_data.hWnd = window_handle_;
+  notify_icon_data.uID = kTrayIconId;
+  notify_icon_data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+  notify_icon_data.uCallbackMessage = kTrayIconMessage;
+  notify_icon_data.hIcon =
+      LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON));
+  lstrcpynW(notify_icon_data.szTip, kTrayTooltip,
+            ARRAYSIZE(notify_icon_data.szTip));
+
+  tray_icon_added_ = Shell_NotifyIconW(NIM_ADD, &notify_icon_data) == TRUE;
+}
+
+void Win32Window::RemoveTrayIcon() {
+  if (!tray_icon_added_) {
+    return;
+  }
+
+  NOTIFYICONDATAW notify_icon_data = {};
+  notify_icon_data.cbSize = sizeof(notify_icon_data);
+  notify_icon_data.hWnd = window_handle_;
+  notify_icon_data.uID = kTrayIconId;
+  Shell_NotifyIconW(NIM_DELETE, &notify_icon_data);
+  tray_icon_added_ = false;
+}
+
+void Win32Window::RestoreFromTray() {
+  if (window_handle_ == nullptr) {
+    return;
+  }
+
+  ShowWindow(window_handle_, SW_RESTORE);
+  SetForegroundWindow(window_handle_);
+  if (child_content_ != nullptr) {
+    SetFocus(child_content_);
+  }
+}
+
+void Win32Window::ShowTrayMenu() {
+  if (window_handle_ == nullptr) {
+    return;
+  }
+
+  HWND hwnd = window_handle_;
+  HMENU menu = CreatePopupMenu();
+  if (menu == nullptr) {
+    return;
+  }
+
+  AppendMenuW(menu, MF_STRING, kTrayMenuShow,
+              L"\u663E\u793A RefChecker");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"\u9000\u51FA");
+
+  POINT cursor_position;
+  GetCursorPos(&cursor_position);
+  SetForegroundWindow(hwnd);
+  UINT command =
+      TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                     cursor_position.x, cursor_position.y, 0, hwnd, nullptr);
+  DestroyMenu(menu);
+  // Ensures the popup menu closes correctly after the window loses focus.
+  PostMessage(hwnd, WM_NULL, 0, 0);
+
+  if (command == kTrayMenuShow) {
+    RestoreFromTray();
+  } else if (command == kTrayMenuExit) {
+    force_close_ = true;
+    RemoveTrayIcon();
+    DestroyWindow(hwnd);
   }
 }

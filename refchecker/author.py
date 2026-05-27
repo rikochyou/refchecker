@@ -67,6 +67,7 @@ def split_bibtex_author_field(author_field: str) -> tuple[list[dict], bool]:
         return [], False
 
     text = str(author_field).replace("\n", " ").replace("\r", " ")
+    text = normalize_author_field(text)
     parts = [p.strip() for p in re.split(r"\s+and\s+", text) if p.strip()]
 
     authors = []
@@ -78,6 +79,48 @@ def split_bibtex_author_field(author_field: str) -> tuple[list[dict], bool]:
             continue
         authors.append(parse_author_name(clean))
     return authors, truncated
+
+
+def normalize_author_field(author_field: str) -> str:
+    """Normalize common author-list formats into BibTeX-compatible ``and`` lists.
+
+    Downstream comparison intentionally expects BibTeX-style author separators.
+    LLMs and pasted APA references often return authors as
+    ``Last, A., Last, B., & Last, C.``.  Without normalization that whole string
+    is treated as one ``Last, given`` author, so author counts become 1.
+    """
+    text = str(author_field or "").replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"\s+", " ", text).strip().rstrip(",;")
+    if not text:
+        return ""
+
+    if re.search(r"\s+and\s+", text, flags=re.I):
+        return text
+
+    if ";" in text:
+        parts = [p.strip() for p in text.split(";") if p.strip()]
+        if len(parts) > 1:
+            return " and ".join(parts)
+
+    # APA-style author list, e.g.
+    # "Vaswani, A., Shazeer, N., ... Kaiser, L., & Polosukhin, I."
+    apa_parts = [
+        p.strip().rstrip(",")
+        for p in re.split(r"\.\s*[,，]\s*|\.\s*&\s*|\.\s+and\s+", text, flags=re.I)
+        if p.strip().rstrip(",")
+    ]
+    if len(apa_parts) > 1:
+        normalized = []
+        for part in apa_parts:
+            part = re.sub(r"^(?:&|and)\s+", "", part, flags=re.I).strip().rstrip(",")
+            if part and not part.endswith("."):
+                part += "."
+            if part:
+                normalized.append(part)
+        if len(normalized) > 1:
+            return " and ".join(normalized)
+
+    return text
 
 
 def first_author_lastname(author_field: str) -> str:

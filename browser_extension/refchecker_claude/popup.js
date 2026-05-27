@@ -1,6 +1,8 @@
 const fields = {
   serverUrl: document.getElementById('serverUrl'),
   threshold: document.getElementById('threshold'),
+  searchMode: document.getElementById('searchMode'),
+  llmParseMode: document.getElementById('llmParseMode'),
   outputDir: document.getElementById('outputDir'),
   pastedLinks: document.getElementById('pastedLinks'),
   pastedContext: document.getElementById('pastedContext'),
@@ -9,6 +11,7 @@ const fields = {
 const statusEl = document.getElementById('status');
 const sourceChipsEl = document.getElementById('sourceChips');
 const sourceSummaryEl = document.getElementById('sourceSummary');
+const sourceHelpEl = document.getElementById('sourceHelp');
 
 const SOURCE_OPTIONS = [
   { key: 'crossref', label: 'CrossRef' },
@@ -34,6 +37,8 @@ const RECOMMENDED_SOURCE_KEYS = [
 const SOURCE_KEY_SET = new Set(SOURCE_OPTIONS.map((item) => item.key));
 const SOURCE_LABELS = Object.fromEntries(SOURCE_OPTIONS.map((item) => [item.key, item.label]));
 let selectedSources = [...RECOMMENDED_SOURCE_KEYS];
+let draggingSourceKey = '';
+let suppressChipClick = false;
 
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
@@ -57,6 +62,9 @@ function collectSettings() {
   return {
     serverUrl: fields.serverUrl.value.trim(),
     threshold: Number(fields.threshold.value || 0.85),
+    searchMode: fields.searchMode.value || 'strict',
+    doiCheck: 'auto',
+    llmParseMode: fields.llmParseMode.value || 'off',
     sources: selectedSources.join(','),
     outputDir: fields.outputDir.value.trim(),
     enableFloatButton: fields.enableFloatButton.checked,
@@ -80,36 +88,135 @@ function parseSources(value) {
   return parsed.length ? [...new Set(parsed)] : [...RECOMMENDED_SOURCE_KEYS];
 }
 
+function moveSelectedSource(sourceKey, targetKey, position = 'before') {
+  if (!sourceKey || !targetKey || sourceKey === targetKey) return false;
+  const from = selectedSources.indexOf(sourceKey);
+  const targetIndex = selectedSources.indexOf(targetKey);
+  if (from < 0 || targetIndex < 0) return false;
+  const next = [...selectedSources];
+  const [item] = next.splice(from, 1);
+  let insertIndex = next.indexOf(targetKey);
+  if (insertIndex < 0) return false;
+  if (position === 'after') insertIndex += 1;
+  next.splice(insertIndex, 0, item);
+  if (next.join(',') === selectedSources.join(',')) return false;
+  selectedSources = next;
+  return true;
+}
+
+function getDropPosition(event, row) {
+  const rect = row.getBoundingClientRect();
+  return event.clientX > rect.left + rect.width / 2 ? 'after' : 'before';
+}
+
+function setDropIndicator(row, position = '') {
+  row.classList.toggle('drag-over', Boolean(position));
+  row.classList.toggle('drag-over-before', position === 'before');
+  row.classList.toggle('drag-over-after', position === 'after');
+}
+
+function clearDropIndicators() {
+  sourceChipsEl
+    .querySelectorAll('.drag-over, .drag-over-before, .drag-over-after')
+    .forEach((row) => setDropIndicator(row));
+}
+
+function suppressNextChipClick() {
+  suppressChipClick = true;
+  setTimeout(() => {
+    suppressChipClick = false;
+  }, 250);
+}
+
+function createSourceChip(option, order) {
+  const isSelected = order >= 0;
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = `source-chip${isSelected ? ' selected' : ''}`;
+  chip.dataset.source = option.key;
+  chip.draggable = isSelected;
+  chip.title = isSelected
+    ? `已参与搜索链，优先级 ${order + 1}；拖拽排序，单击退出`
+    : '未参与搜索链；单击加入';
+  chip.innerHTML = isSelected
+    ? `<span class="order">${order + 1}</span><span>${option.label}</span>`
+    : `<span>${option.label}</span>`;
+
+  if (isSelected) {
+    chip.addEventListener('dragstart', (event) => {
+      draggingSourceKey = option.key;
+      chip.classList.add('dragging');
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', option.key);
+    });
+    chip.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      if (draggingSourceKey && draggingSourceKey !== option.key) {
+        setDropIndicator(chip, getDropPosition(event, chip));
+        event.dataTransfer.dropEffect = 'move';
+      }
+    });
+    chip.addEventListener('dragleave', () => setDropIndicator(chip));
+    chip.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      const position = getDropPosition(event, chip);
+      clearDropIndicators();
+      const sourceKey = event.dataTransfer.getData('text/plain') || draggingSourceKey;
+      draggingSourceKey = '';
+      suppressNextChipClick();
+      if (moveSelectedSource(sourceKey, option.key, position)) {
+        renderSourceChips();
+        await saveSettings();
+      }
+    });
+    chip.addEventListener('dragend', () => {
+      if (draggingSourceKey) suppressNextChipClick();
+      draggingSourceKey = '';
+      chip.classList.remove('dragging');
+      clearDropIndicators();
+    });
+  }
+
+  chip.addEventListener('click', async (event) => {
+    if (suppressChipClick) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (selectedSources.includes(option.key)) {
+      selectedSources = selectedSources.filter((key) => key !== option.key);
+      if (!selectedSources.length) {
+        selectedSources = [...RECOMMENDED_SOURCE_KEYS];
+        setStatus('至少需要一个数据源，已恢复推荐组合。');
+      }
+    } else {
+      selectedSources = [...selectedSources, option.key];
+    }
+    renderSourceChips();
+    await saveSettings();
+  });
+
+  return chip;
+}
+
 function renderSourceChips() {
   const selectedSet = new Set(selectedSources);
   sourceChipsEl.innerHTML = '';
-  for (const option of SOURCE_OPTIONS) {
-    const order = selectedSources.indexOf(option.key);
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `source-chip${selectedSet.has(option.key) ? ' selected' : ''}`;
-    button.dataset.source = option.key;
-    button.title = selectedSet.has(option.key)
-      ? `已选择，优先级 ${order + 1}；点击取消`
-      : '点击加入数据源优先级';
-    button.innerHTML = selectedSet.has(option.key)
-      ? `<span class="order">${order + 1}</span><span>${option.label}</span>`
-      : `<span>${option.label}</span>`;
-    button.addEventListener('click', async () => {
-      if (selectedSet.has(option.key)) {
-        selectedSources = selectedSources.filter((key) => key !== option.key);
-      } else {
-        selectedSources = [...selectedSources, option.key];
-      }
-      if (!selectedSources.length) {
-        selectedSources = [...RECOMMENDED_SOURCE_KEYS];
-      }
-      renderSourceChips();
-      await saveSettings();
-    });
-    sourceChipsEl.appendChild(button);
-  }
 
+  const displayKeys = [
+    ...selectedSources,
+    ...SOURCE_OPTIONS.map((item) => item.key).filter((key) => !selectedSet.has(key)),
+  ];
+  displayKeys.forEach((key) => {
+    const option = SOURCE_OPTIONS.find((item) => item.key === key);
+    if (!option) return;
+    sourceChipsEl.appendChild(createSourceChip(option, selectedSources.indexOf(key)));
+  });
+
+  const mode = fields.searchMode.value || 'strict';
+  sourceHelpEl.textContent = mode === 'parallel'
+    ? '快速并发：多源同时查询；拖拽带数字的小标签调整优先级，单击可加入/退出搜索链。Springer、IEEE、CORE 需要先配置 API Key。'
+    : '严格顺序：按数字顺序逐个查询；拖拽小标签排序，单击可加入/退出搜索链。Springer、IEEE、CORE 需要先配置 API Key。';
   sourceSummaryEl.textContent = `当前优先级：${selectedSources.map((key) => SOURCE_LABELS[key] || key).join(' → ')}`;
 }
 
@@ -122,6 +229,8 @@ async function loadSettings() {
   const settings = response.settings || {};
   fields.serverUrl.value = settings.serverUrl || 'http://127.0.0.1:8765';
   fields.threshold.value = settings.threshold || 0.85;
+  fields.searchMode.value = settings.searchMode || 'strict';
+  fields.llmParseMode.value = settings.llmParseMode || 'off';
   fields.outputDir.value = settings.outputDir || '';
   fields.enableFloatButton.checked = settings.enableFloatButton !== false;
   selectedSources = parseSources(settings.sources);
@@ -183,7 +292,10 @@ document.getElementById('checkPasted').addEventListener('click', async () => {
 });
 
 for (const input of Object.values(fields)) {
-  input.addEventListener('change', saveSettings);
+  input.addEventListener('change', async () => {
+    if (input === fields.searchMode) renderSourceChips();
+    await saveSettings();
+  });
 }
 
 renderSourceChips();

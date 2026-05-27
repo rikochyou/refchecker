@@ -90,7 +90,19 @@ class Win32Window {
   // Update the window frame's theme to match the system theme.
   static void UpdateTheme(HWND const window);
 
+  // Adds/removes the app icon in the Windows notification area.
+  void AddTrayIcon();
+  void RemoveTrayIcon();
+
+  // Restores the main window from the notification area.
+  void RestoreFromTray();
+
+  // Shows the tray context menu.
+  void ShowTrayMenu();
+
   bool quit_on_close_ = false;
+  bool tray_icon_added_ = false;
+  bool force_close_ = false;
 
   // window handle for top level window.
   HWND window_handle_ = nullptr;

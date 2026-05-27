@@ -90,6 +90,31 @@ def _as_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _is_web_evidence_profile(profile: dict) -> bool:
+    """Return True for REST profiles that expose web-search evidence, not metadata."""
+    raw = (
+        profile.get("evidenceType")
+        or profile.get("evidence_type")
+        or profile.get("resultKind")
+        or profile.get("result_kind")
+        or profile.get("kind")
+        or ""
+    )
+    normalized = str(raw).strip().lower().replace("-", "_")
+    if normalized in {"web", "web_evidence", "web_search", "search_results", "brave", "brave_search"}:
+        return True
+    endpoint = str(profile.get("endpoint") or "").lower()
+    name = str(profile.get("name") or "").lower()
+    return "api.search.brave.com" in endpoint or "brave" in name
+
+
+def _json_dumps_compact(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        return ""
+
+
 def _author_list(raw: Any) -> list[dict]:
     if raw is None:
         return []
@@ -163,6 +188,8 @@ def normalize_profiles(profiles: Any) -> list[dict]:
         item.setdefault("urlPath", "url")
         item.setdefault("venuePath", "venue")
         item.setdefault("typePath", "type")
+        item.setdefault("snippetPath", "description")
+        item.setdefault("displayUrlPath", "url")
         item["sourceKey"] = custom_source_id(item)
         if _as_bool(item.get("enabled"), True) and item.get("endpoint"):
             normalized.append(item)
@@ -310,6 +337,7 @@ def search_custom_rest(profile: dict, title: str, author: str, year: str,
                        threshold: float, email: str = "") -> dict:
     name = profile.get("name") or "Custom REST"
     endpoint = (profile.get("endpoint") or "").strip()
+    is_web_evidence = _is_web_evidence_profile(profile)
     if not endpoint:
         return {"found": False, "reason": f"{name} 未配置 endpoint", "source": name}
 
@@ -346,12 +374,17 @@ def search_custom_rest(profile: dict, title: str, author: str, year: str,
 
     results = _list_results(payload, profile.get("resultsPath") or "")
     candidates: list[dict] = []
+    web_evidence_rows: list[dict] = []
     for item in results[:10]:
         if not isinstance(item, dict):
             continue
         item_title = _as_text(_first_value(item, [profile.get("titlePath") or "", "title", "name"]))
         authors = _author_list(_first_value(item, [profile.get("authorsPath") or "", "authors", "creators"]))
         item_year = extract_year(_as_text(_first_value(item, [profile.get("yearPath") or "", "year", "publicationYear", "published"])))
+        item_url = _as_text(_first_value(item, [profile.get("urlPath") or "", "url", "link"]))
+        item_venue = _as_text(_first_value(item, [profile.get("venuePath") or "", "venue", "journal", "publisher", "profile.name"]))
+        item_type = _as_text(_first_value(item, [profile.get("typePath") or "", "type", "documentType"]))
+        item_snippet = _as_text(_first_value(item, [profile.get("snippetPath") or "", "description", "snippet", "summary"]))
         candidate = {
             "found": False,
             "status": "not_found",
@@ -360,12 +393,29 @@ def search_custom_rest(profile: dict, title: str, author: str, year: str,
             "author_list": authors,
             "authors": author_display_list(authors, limit=3),
             "year": item_year,
-            "venue": _as_text(_first_value(item, [profile.get("venuePath") or "", "venue", "journal", "publisher"])),
-            "type": _as_text(_first_value(item, [profile.get("typePath") or "", "type", "documentType"])),
+            "venue": item_venue,
+            "type": item_type,
             "doi": clean_doi(_as_text(_first_value(item, [profile.get("doiPath") or "", "doi", "DOI"]))),
-            "url": _as_text(_first_value(item, [profile.get("urlPath") or "", "url", "link"])),
+            "url": item_url,
             "source": name,
         }
+        if item_snippet:
+            candidate["snippet"] = item_snippet
+        if is_web_evidence and (item_title or item_url):
+            candidate["web_evidence"] = "Yes"
+            candidate["evidence_kind"] = "web"
+            candidate["web_evidence_note"] = (
+                f"{name} returns web search results only. Treat this as auxiliary web evidence, "
+                "not as structured bibliographic metadata."
+            )
+            web_evidence_rows.append({
+                "rank": len(web_evidence_rows) + 1,
+                "title": item_title,
+                "url": item_url,
+                "source": item_venue,
+                "snippet": item_snippet,
+                "similarity": round(candidate["similarity"], 4),
+            })
         candidates.append(candidate)
 
     if not candidates:
@@ -381,6 +431,27 @@ def search_custom_rest(profile: dict, title: str, author: str, year: str,
     best = max(candidates, key=lambda c: candidate_score(c, author, year))
     best["found"] = best.get("similarity", 0) >= threshold
     best["status"] = "found" if best["found"] else "not_found"
+    if is_web_evidence:
+        best["web_evidence"] = "Yes"
+        best["evidence_kind"] = "web"
+        best["web_evidence_note"] = (
+            f"{name} is a web-search evidence source. It can show pages to open and inspect, "
+            "but it does not by itself verify authors, year, DOI, or publication metadata."
+        )
+        best["web_evidence_results"] = web_evidence_rows[:5]
+        best["web_evidence_links"] = "\n".join(
+            f"{row.get('rank')}. {row.get('title') or row.get('source') or 'Result'}"
+            + (f" — {row.get('url')}" if row.get("url") else "")
+            + (f"\n   {row.get('snippet')}" if row.get("snippet") else "")
+            for row in web_evidence_rows[:5]
+        )
+        if best["found"]:
+            best["reason"] = (
+                f"{name} found a title-similar web result, but this is web evidence only; "
+                "open the linked page and confirm metadata manually."
+            )
     if not best["found"]:
         best["reason"] = f"{name} 最高标题相似度 {best.get('similarity', 0):.0%}"
+        if is_web_evidence:
+            best["reason"] += " (web evidence only; no structured bibliographic metadata)"
     return best

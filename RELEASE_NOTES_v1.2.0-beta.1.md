@@ -41,6 +41,12 @@ This beta focuses on making RefChecker easier to use from Claude Desktop, Claude
   1. Select a complete reference entry → check selected text.
   2. Copy a complete URL/DOI → paste it into the extension panel → check pasted link.
 
+### Optional LLM-assisted parsing
+
+- Added an opt-in LLM parsing mode for messy selected/pasted references: `off`, `auto`, or `always`.
+- The LLM is constrained to extracting explicit fields (`title`, `authors`, `year`, `doi`, `url`) only; it does not judge whether a reference is real and does not fabricate missing information.
+- API keys stay in the desktop/local backend configuration or environment variables; the browser extension does not store LLM API keys.
+
 ## Included docs
 
 - `README.md`

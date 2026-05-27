@@ -5,6 +5,7 @@ import time
 import requests
 
 from .utils import strip_latex, title_similarity, extract_year
+from .author import parse_author_name
 
 # --------------------------- URL 资源验证 ---------------------------
 

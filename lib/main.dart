@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -49,6 +50,91 @@ class RefCheckerApp extends StatelessWidget {
   }
 }
 
+class _UpdateBanner extends StatelessWidget {
+  const _UpdateBanner({
+    required this.info,
+    required this.currentVersion,
+    required this.onViewRelease,
+    required this.onDownload,
+    required this.onDismiss,
+  });
+
+  final _UpdateInfo info;
+  final String currentVersion;
+  final VoidCallback onViewRelease;
+  final VoidCallback onDownload;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
+      decoration: const BoxDecoration(
+        color: Color(0xfffffbeb),
+        border: Border(bottom: BorderSide(color: Color(0xfff1d08a))),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.system_update_alt_rounded, color: Color(0xff9a6500)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '发现新版本 v${info.latestVersion}（当前 v$currentVersion）',
+                  style: const TextStyle(
+                    color: Color(0xff684600),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                if (info.releaseNotes.isNotEmpty)
+                  Text(
+                    info.releaseNotes,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xff7c5a16),
+                      fontSize: 12,
+                    ),
+                  )
+                else
+                  const Text(
+                    '建议下载新版便携包。若本次包含浏览器插件更新，请重新加载插件目录。',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Color(0xff7c5a16),
+                      fontSize: 12,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          TextButton(
+            onPressed: onViewRelease,
+            child: const Text('查看更新'),
+          ),
+          const SizedBox(width: 6),
+          FilledButton.tonalIcon(
+            onPressed: onDownload,
+            icon: const Icon(Icons.download_rounded, size: 18),
+            label: const Text('下载新版'),
+          ),
+          IconButton(
+            tooltip: '关闭更新提示',
+            onPressed: onDismiss,
+            icon: const Icon(Icons.close_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 String _settingsPath() {
   final appData = Platform.environment['APPDATA'] ??
       Platform.environment['HOME'] ??
@@ -63,13 +149,59 @@ class RefCheckerHomePage extends StatefulWidget {
   State<RefCheckerHomePage> createState() => _RefCheckerHomePageState();
 }
 
+class _UpdateInfo {
+  const _UpdateInfo({
+    required this.latestVersion,
+    required this.releaseUrl,
+    required this.downloadUrl,
+    required this.releaseNotes,
+  });
+
+  final String latestVersion;
+  final String releaseUrl;
+  final String downloadUrl;
+  final String releaseNotes;
+}
+
+class _ParsedVersion {
+  const _ParsedVersion({
+    required this.core,
+    required this.preRelease,
+  });
+
+  final List<int> core;
+  final List<String> preRelease;
+
+  static _ParsedVersion parse(String value) {
+    var normalized = value.trim().replaceFirst(RegExp(r'^[vV]'), '');
+    normalized = normalized.split('+').first;
+    final pieces = normalized.split('-');
+    final coreParts = pieces.first
+        .split('.')
+        .map((part) => int.tryParse(part) ?? 0)
+        .toList(growable: false);
+    final preRelease = pieces.length > 1
+        ? pieces.sublist(1).join('-').split('.')
+        : const <String>[];
+    return _ParsedVersion(core: coreParts, preRelease: preRelease);
+  }
+}
+
 class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   static const _nativeDialogs = MethodChannel('refchecker/native_dialogs');
   static const _httpServerHost = '127.0.0.1';
   static const _httpServerPort = 8765;
+  static const _githubReleasesApiUrl =
+      'https://api.github.com/repos/rikochyou/refchecker/releases?per_page=20';
+  static const _githubLatestReleaseUrl =
+      'https://github.com/rikochyou/refchecker/releases/latest';
 
   final _emailController = TextEditingController();
   final _textController = TextEditingController();
+  final _llmModelController = TextEditingController(text: 'gpt-4o-mini');
+  final _llmBaseUrlController =
+      TextEditingController(text: 'https://api.openai.com/v1');
+  final _llmApiKeyController = TextEditingController();
   double _threshold = 0.85;
   double _delay = defaultDelaySeconds;
   bool _useCrossref = true;
@@ -84,12 +216,23 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   bool _useCore = true;
   bool _advancedOpen = false;
   bool _useTextMode = false;
+  String _searchMode = 'strict';
+  String _doiCheck = 'auto';
+  String _llmParseMode = 'off';
+  String _llmProvider = 'openai-compatible';
+  String _selectedLlmApiConfigId = '';
   List<String> _sourceOrder = defaultSourceOrder();
 
+  final List<LlmApiConfigEntry> _llmApiConfigs = [];
   final List<CustomApiSourceEntry> _customApiSources = [];
+  int _llmConfigIdSeed = 0;
   int _customSourceIdSeed = 0;
   bool _settingsLoaded = false;
   Timer? _saveTimer;
+  Timer? _httpRestartTimer;
+  bool _checkingForUpdates = false;
+  bool _updateDismissed = false;
+  _UpdateInfo? _updateInfo;
 
   static const _sourceNames = <String, String>{
     'crossref': 'CrossRef',
@@ -351,18 +494,30 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   final List<EntryResult> _results = [];
   final List<String> _logs = [];
   final List<ApiKeyTestResult> _apiKeyTestResults = [];
+  final List<ApiKeyTestResult> _llmApiTestResults = [];
   final ValueNotifier<int> _apiKeyTestRevision = ValueNotifier<int>(0);
+  final ValueNotifier<int> _llmApiTestRevision = ValueNotifier<int>(0);
   final Set<String> _testingApiSourceIds = <String>{};
+  final Set<String> _testingLlmApiConfigIds = <String>{};
   final StringBuffer _fullLog = StringBuffer();
   IOSink? _logSink;
   String _logPath = '';
   Process? _process;
   Process? _httpServerProcess;
+  Future<void>? _httpServerStartFuture;
+  Timer? _httpServerHeartbeatTimer;
+  String? _httpServerHeartbeatPath;
+  AppLifecycleListener? _appLifecycleListener;
+  bool _isAppExiting = false;
+  bool _isStoppingChildProcesses = false;
+  bool _cancelRequested = false;
   bool get _testingApiKeys => _testingApiSourceIds.isNotEmpty;
+  bool get _testingLlmApiKeys => _testingLlmApiConfigIds.isNotEmpty;
+  bool get _testingAnyApiKeys => _testingApiKeys || _testingLlmApiKeys;
 
   bool get _canRun =>
       _runState != RunState.running &&
-      !_testingApiKeys &&
+      !_testingAnyApiKeys &&
       _baseOutputDir != null &&
       (_useTextMode
           ? _textController.text.trim().isNotEmpty
@@ -379,25 +534,89 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   @override
   void initState() {
     super.initState();
+    _appLifecycleListener = AppLifecycleListener(
+      onExitRequested: _handleAppExitRequested,
+      onDetach: () {
+        unawaited(_shutdownChildProcesses(log: false));
+      },
+    );
     _emailController.addListener(_scheduleSaveSettings);
     _textController.addListener(_scheduleSaveSettings);
+    _llmModelController.addListener(_scheduleSaveSettings);
+    _llmBaseUrlController.addListener(_scheduleSaveSettings);
+    _llmApiKeyController.addListener(_scheduleSaveSettings);
+    _llmModelController.addListener(_scheduleHttpServerRestart);
+    _llmBaseUrlController.addListener(_scheduleHttpServerRestart);
+    _llmApiKeyController.addListener(_scheduleHttpServerRestart);
     unawaited(_loadSettings().then((_) => _ensureHttpServerStarted()));
+    unawaited(_checkForUpdates());
   }
 
   @override
   void dispose() {
+    _appLifecycleListener?.dispose();
+    _appLifecycleListener = null;
     _saveTimer?.cancel();
+    _httpRestartTimer?.cancel();
     _emailController.dispose();
     _textController.dispose();
+    _llmModelController.dispose();
+    _llmBaseUrlController.dispose();
+    _llmApiKeyController.dispose();
     for (final entry in _customApiSources) {
       entry.dispose();
     }
+    for (final entry in _llmApiConfigs) {
+      entry.dispose();
+    }
     _apiKeyTestRevision.dispose();
+    _llmApiTestRevision.dispose();
     unawaited(_logSink?.flush());
     unawaited(_logSink?.close());
-    _process?.kill();
-    _httpServerProcess?.kill();
+    if (!_isAppExiting) {
+      unawaited(_shutdownChildProcesses(log: false));
+    }
     super.dispose();
+  }
+
+  Future<AppExitResponse> _handleAppExitRequested() async {
+    _isAppExiting = true;
+    try {
+      await _shutdownChildProcesses(log: false)
+          .timeout(const Duration(seconds: 6));
+    } catch (_) {
+      // Do not block application exit indefinitely. The HTTP server also
+      // monitors this app's PID and will self-terminate if the app disappears.
+    }
+    return AppExitResponse.exit;
+  }
+
+  Future<void> _shutdownChildProcesses({required bool log}) async {
+    if (_isStoppingChildProcesses) {
+      return;
+    }
+    _isStoppingChildProcesses = true;
+    _httpRestartTimer?.cancel();
+    _stopHttpServerHeartbeat(delete: true);
+    try {
+      final httpProcess = _httpServerProcess;
+      _httpServerProcess = null;
+      if (httpProcess != null) {
+        await _stopHttpServerProcess(httpProcess, log: log);
+      }
+
+      final runningProcess = _process;
+      _process = null;
+      if (runningProcess != null) {
+        await _terminateProcessTree(
+          runningProcess,
+          label: '后端进程',
+          log: log,
+        );
+      }
+    } finally {
+      _isStoppingChildProcesses = false;
+    }
   }
 
   Future<void> _pickBibFile() async {
@@ -430,12 +649,14 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     try {
       final file = File(_settingsPath());
       if (!await file.exists()) {
+        _ensureDefaultLlmApiConfigs();
         _ensureDefaultApiSources();
         _settingsLoaded = true;
         return;
       }
       final json = jsonDecode(await file.readAsString());
       if (json is! Map<String, dynamic>) {
+        _ensureDefaultLlmApiConfigs();
         _ensureDefaultApiSources();
         _settingsLoaded = true;
         return;
@@ -455,6 +676,20 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         _useSpringer = settings.useSpringer;
         _useIeee = settings.useIeee;
         _useCore = settings.useCore;
+        _searchMode = settings.searchMode == 'parallel' ? 'parallel' : 'strict';
+        _doiCheck = settings.doiCheck == 'off' ? 'off' : 'auto';
+        _llmParseMode = switch (settings.llmParseMode) {
+          'auto' => 'auto',
+          'always' => 'always',
+          _ => 'off',
+        };
+        _llmProvider = settings.llmProvider.isEmpty
+            ? 'openai-compatible'
+            : settings.llmProvider;
+        _llmModelController.text = settings.llmModel;
+        _llmBaseUrlController.text = settings.llmBaseUrl;
+        _llmApiKeyController.text = settings.llmApiKey;
+        _resetLlmApiConfigsFromSettings(settings);
         if (settings.sourceOrder.isNotEmpty) {
           _sourceOrder = settings.sourceOrder;
         }
@@ -470,12 +705,172 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         if (_customApiSources.isEmpty) {
           _ensureDefaultApiSources();
         }
+        if (_llmApiConfigs.isEmpty) {
+          _ensureDefaultLlmApiConfigs();
+        }
       });
       _settingsLoaded = true;
     } catch (_) {
+      _ensureDefaultLlmApiConfigs();
       _ensureDefaultApiSources();
       _settingsLoaded = true;
     }
+  }
+
+  void _resetLlmApiConfigsFromSettings(RunSettings settings) {
+    for (final entry in _llmApiConfigs) {
+      entry.dispose();
+    }
+    _llmApiConfigs.clear();
+
+    final configs = settings.llmApiConfigs.isNotEmpty
+        ? settings.llmApiConfigs
+        : [
+            LlmApiConfig(
+              id: 'llm-default',
+              name: '默认 LLM',
+              provider: settings.llmProvider.isEmpty
+                  ? 'openai-compatible'
+                  : settings.llmProvider,
+              model:
+                  settings.llmModel.isEmpty ? 'gpt-4o-mini' : settings.llmModel,
+              baseUrl: settings.llmBaseUrl.isEmpty
+                  ? 'https://api.openai.com/v1'
+                  : settings.llmBaseUrl,
+              apiKey: settings.llmApiKey,
+              enabled: true,
+            ),
+          ];
+
+    for (var i = 0; i < configs.length; i++) {
+      final config = configs[i];
+      final entry = _entryFromLlmConfig(
+        config.copyWith(
+          enabled: config.enabled ||
+              (settings.selectedLlmApiConfigId.isEmpty && i == 0),
+        ),
+      );
+      _attachLlmApiConfigListeners(entry);
+      _llmApiConfigs.add(entry);
+    }
+
+    _selectedLlmApiConfigId = settings.selectedLlmApiConfigId;
+    if (_selectedLlmApiConfigId.isEmpty ||
+        !_llmApiConfigs.any((entry) => entry.id == _selectedLlmApiConfigId)) {
+      LlmApiConfigEntry? selected;
+      for (final entry in _llmApiConfigs) {
+        if (entry.enabled) {
+          selected = entry;
+          break;
+        }
+      }
+      selected ??= _llmApiConfigs.isEmpty ? null : _llmApiConfigs.first;
+      _selectedLlmApiConfigId = selected?.id ?? '';
+    }
+    for (final entry in _llmApiConfigs) {
+      entry.enabled = entry.id == _selectedLlmApiConfigId;
+    }
+    _syncActiveLlmControllersFromSelected();
+  }
+
+  void _ensureDefaultLlmApiConfigs() {
+    if (_llmApiConfigs.isNotEmpty) return;
+    final entry = _entryFromLlmConfig(
+      LlmApiConfig(
+        id: 'llm-default',
+        name: '默认 LLM',
+        provider: _llmProvider.isEmpty ? 'openai-compatible' : _llmProvider,
+        model: _llmModelController.text.trim().isEmpty
+            ? 'gpt-4o-mini'
+            : _llmModelController.text.trim(),
+        baseUrl: _llmBaseUrlController.text.trim().isEmpty
+            ? 'https://api.openai.com/v1'
+            : _llmBaseUrlController.text.trim(),
+        apiKey: _llmApiKeyController.text.trim(),
+        enabled: true,
+      ),
+    );
+    _attachLlmApiConfigListeners(entry);
+    _llmApiConfigs.add(entry);
+    _selectedLlmApiConfigId = entry.id;
+    _syncActiveLlmControllersFromSelected();
+  }
+
+  LlmApiConfigEntry _entryFromLlmConfig(LlmApiConfig config) {
+    final id = config.id.trim().isEmpty ? _newLlmConfigId() : config.id.trim();
+    return LlmApiConfigEntry(
+      id: id,
+      nameController: TextEditingController(
+        text: config.name.trim().isEmpty ? '默认 LLM' : config.name.trim(),
+      ),
+      providerController: TextEditingController(
+        text: config.provider.trim().isEmpty
+            ? 'openai-compatible'
+            : config.provider.trim(),
+      ),
+      modelController: TextEditingController(
+        text: config.model.trim().isEmpty ? 'gpt-4o-mini' : config.model.trim(),
+      ),
+      baseUrlController: TextEditingController(
+        text: config.baseUrl.trim().isEmpty
+            ? 'https://api.openai.com/v1'
+            : config.baseUrl.trim(),
+      ),
+      apiKeyController: TextEditingController(text: config.apiKey.trim()),
+      enabled: config.enabled,
+    );
+  }
+
+  String _newLlmConfigId() {
+    String id;
+    do {
+      _llmConfigIdSeed += 1;
+      id = 'llm-$_llmConfigIdSeed';
+    } while (_llmApiConfigs.any((entry) => entry.id == id));
+    return id;
+  }
+
+  void _attachLlmApiConfigListeners(LlmApiConfigEntry entry) {
+    void listener() {
+      _scheduleSaveSettings();
+      if (entry.id == _selectedLlmApiConfigId || entry.enabled) {
+        _scheduleHttpServerRestart();
+      }
+      if (mounted) {
+        setState(() {});
+      }
+    }
+
+    entry.nameController.addListener(listener);
+    entry.providerController.addListener(listener);
+    entry.modelController.addListener(listener);
+    entry.baseUrlController.addListener(listener);
+    entry.apiKeyController.addListener(listener);
+  }
+
+  LlmApiConfigEntry? _selectedLlmApiEntry() {
+    for (final entry in _llmApiConfigs) {
+      if (entry.id == _selectedLlmApiConfigId) {
+        return entry;
+      }
+    }
+    for (final entry in _llmApiConfigs) {
+      if (entry.enabled) {
+        return entry;
+      }
+    }
+    return _llmApiConfigs.isEmpty ? null : _llmApiConfigs.first;
+  }
+
+  void _syncActiveLlmControllersFromSelected() {
+    final entry = _selectedLlmApiEntry();
+    if (entry == null) return;
+    _llmProvider = entry.providerController.text.trim().isEmpty
+        ? 'openai-compatible'
+        : entry.providerController.text.trim();
+    _llmModelController.text = entry.modelController.text.trim();
+    _llmBaseUrlController.text = entry.baseUrlController.text.trim();
+    _llmApiKeyController.text = entry.apiKeyController.text.trim();
   }
 
   void _ensureDefaultApiSources() {
@@ -502,6 +897,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   void _attachCustomApiSourceListeners(CustomApiSourceEntry entry) {
     void listener() {
       _scheduleSaveSettings();
+      _scheduleHttpServerRestart();
       if (mounted) {
         setState(() {});
       }
@@ -534,6 +930,26 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     _saveTimer = Timer(const Duration(milliseconds: 500), _saveSettings);
   }
 
+  void _scheduleHttpServerRestart() {
+    if (_isAppExiting) return;
+    if (!_settingsLoaded) return;
+    _httpRestartTimer?.cancel();
+    _httpRestartTimer = Timer(const Duration(milliseconds: 900), () {
+      unawaited(_restartHttpServer());
+    });
+  }
+
+  Future<void> _restartHttpServer() async {
+    if (_isAppExiting) {
+      return;
+    }
+    if (_runState == RunState.running) {
+      return;
+    }
+    await _stopOwnedHttpServer();
+    await _ensureHttpServerStarted();
+  }
+
   Future<void> _saveSettings() async {
     if (!_settingsLoaded) return;
     try {
@@ -543,6 +959,190 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
       await file.writeAsString(
           const JsonEncoder.withIndent('  ').convert(settings.toJson()));
     } catch (_) {}
+  }
+
+  Future<void> _checkForUpdates() async {
+    if (_checkingForUpdates) {
+      return;
+    }
+    setState(() {
+      _checkingForUpdates = true;
+    });
+
+    try {
+      final update = await _fetchLatestUpdateInfo();
+      if (!mounted) {
+        return;
+      }
+      if (update != null &&
+          _compareAppVersions(update.latestVersion, appVersion) > 0) {
+        setState(() {
+          _updateInfo = update;
+          _updateDismissed = false;
+        });
+      }
+    } catch (_) {
+      // Network access may be blocked by enterprise/firewall settings. Update
+      // checks should never interrupt local reference verification.
+    } finally {
+      if (mounted) {
+        setState(() {
+          _checkingForUpdates = false;
+        });
+      }
+    }
+  }
+
+  Future<_UpdateInfo?> _fetchLatestUpdateInfo() async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+    try {
+      final request =
+          await client.getUrl(Uri.parse(_githubReleasesApiUrl)).timeout(
+                const Duration(seconds: 6),
+              );
+      request.headers
+          .set(HttpHeaders.acceptHeader, 'application/vnd.github+json');
+      request.headers
+          .set(HttpHeaders.userAgentHeader, 'RefChecker/$appVersion');
+      final response =
+          await request.close().timeout(const Duration(seconds: 8));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      final body = await response.transform(utf8.decoder).join();
+      final decoded = jsonDecode(body);
+      if (decoded is! List) {
+        return null;
+      }
+
+      _UpdateInfo? best;
+      for (final item in decoded) {
+        if (item is! Map) {
+          continue;
+        }
+        if (item['draft'] == true) {
+          continue;
+        }
+        final rawVersion = asString(item['tag_name']).isNotEmpty
+            ? asString(item['tag_name'])
+            : asString(item['name']);
+        final tagVersion = _extractVersion(rawVersion);
+        if (tagVersion.isEmpty) {
+          continue;
+        }
+        final releaseUrl = asString(item['html_url']).isEmpty
+            ? _githubLatestReleaseUrl
+            : asString(item['html_url']);
+        final update = _UpdateInfo(
+          latestVersion: tagVersion,
+          releaseUrl: releaseUrl,
+          downloadUrl: _preferredDownloadUrl(item) ?? releaseUrl,
+          releaseNotes: trimStr(asString(item['body']).trim(), 180),
+        );
+        if (best == null ||
+            _compareAppVersions(update.latestVersion, best.latestVersion) > 0) {
+          best = update;
+        }
+      }
+      return best;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  String? _preferredDownloadUrl(Map<dynamic, dynamic> release) {
+    final assets = release['assets'];
+    if (assets is! List) {
+      return null;
+    }
+
+    String? fallbackZip;
+    for (final asset in assets) {
+      if (asset is! Map) {
+        continue;
+      }
+      final name = asString(asset['name']).toLowerCase();
+      final url = asString(asset['browser_download_url']);
+      if (url.isEmpty || !name.endsWith('.zip')) {
+        continue;
+      }
+      fallbackZip ??= url;
+      if (name.contains('refchecker') && name.contains('portable')) {
+        return url;
+      }
+    }
+    return fallbackZip;
+  }
+
+  String _extractVersion(String value) {
+    final text = value.trim();
+    if (text.isEmpty) {
+      return '';
+    }
+    final match = RegExp(
+      r'v?(\d+(?:\.\d+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?(?:\+[A-Za-z0-9.-]+)?)',
+      caseSensitive: false,
+    ).firstMatch(text);
+    return match?.group(1) ?? text.replaceFirst(RegExp(r'^[vV]'), '');
+  }
+
+  int _compareAppVersions(String left, String right) {
+    final a = _ParsedVersion.parse(left);
+    final b = _ParsedVersion.parse(right);
+
+    final coreLength =
+        a.core.length > b.core.length ? a.core.length : b.core.length;
+    for (var i = 0; i < coreLength; i++) {
+      final diff = (i < a.core.length ? a.core[i] : 0) -
+          (i < b.core.length ? b.core[i] : 0);
+      if (diff != 0) {
+        return diff.sign;
+      }
+    }
+
+    if (a.preRelease.isEmpty && b.preRelease.isEmpty) {
+      return 0;
+    }
+    if (a.preRelease.isEmpty) {
+      return 1;
+    }
+    if (b.preRelease.isEmpty) {
+      return -1;
+    }
+
+    final preLength = a.preRelease.length > b.preRelease.length
+        ? a.preRelease.length
+        : b.preRelease.length;
+    for (var i = 0; i < preLength; i++) {
+      if (i >= a.preRelease.length) {
+        return -1;
+      }
+      if (i >= b.preRelease.length) {
+        return 1;
+      }
+      final leftPart = a.preRelease[i];
+      final rightPart = b.preRelease[i];
+      final leftNumber = int.tryParse(leftPart);
+      final rightNumber = int.tryParse(rightPart);
+      if (leftNumber != null && rightNumber != null) {
+        final diff = leftNumber - rightNumber;
+        if (diff != 0) {
+          return diff.sign;
+        }
+        continue;
+      }
+      if (leftNumber != null) {
+        return -1;
+      }
+      if (rightNumber != null) {
+        return 1;
+      }
+      final diff = leftPart.compareTo(rightPart);
+      if (diff != 0) {
+        return diff.sign;
+      }
+    }
+    return 0;
   }
 
   // ── data source toggles ──
@@ -584,6 +1184,95 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
           insertIndex < 0 ? _sourceOrder.length : insertIndex, item);
     });
     _scheduleSaveSettings();
+  }
+
+  // ── LLM API configs ──
+
+  void _addLlmApiConfig() {
+    final entry = _entryFromLlmConfig(
+      LlmApiConfig(
+        id: _newLlmConfigId(),
+        name: '新的 LLM',
+        provider: 'openai-compatible',
+        model: 'gpt-4o-mini',
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: '',
+        enabled: _llmApiConfigs.isEmpty,
+      ),
+    );
+    _attachLlmApiConfigListeners(entry);
+    setState(() {
+      _llmApiConfigs.add(entry);
+      if (_selectedLlmApiConfigId.isEmpty || entry.enabled) {
+        _selectLlmApiConfigInMemory(_llmApiConfigs.length - 1);
+      }
+    });
+    _scheduleSaveSettings();
+    _scheduleHttpServerRestart();
+  }
+
+  void _removeLlmApiConfig(int index) {
+    if (index < 0 || index >= _llmApiConfigs.length) return;
+    final removingSelected =
+        _llmApiConfigs[index].id == _selectedLlmApiConfigId;
+    final entry = _llmApiConfigs.removeAt(index);
+    _testingLlmApiConfigIds.remove(entry.id);
+    _llmApiTestResults.removeWhere((item) => item.source == 'llm:${entry.id}');
+    entry.dispose();
+    setState(() {
+      if (_llmApiConfigs.isEmpty) {
+        _selectedLlmApiConfigId = '';
+        _ensureDefaultLlmApiConfigs();
+      } else if (removingSelected) {
+        final newIndex = index >= _llmApiConfigs.length
+            ? _llmApiConfigs.length - 1
+            : index;
+        _selectLlmApiConfigInMemory(newIndex);
+      }
+    });
+    _notifyLlmApiTestChanged();
+    _scheduleSaveSettings();
+    _scheduleHttpServerRestart();
+  }
+
+  void _selectLlmApiConfig(int index) {
+    if (index < 0 || index >= _llmApiConfigs.length) return;
+    setState(() => _selectLlmApiConfigInMemory(index));
+    _scheduleSaveSettings();
+    _scheduleHttpServerRestart();
+  }
+
+  void _selectLlmApiConfigInMemory(int index) {
+    if (index < 0 || index >= _llmApiConfigs.length) return;
+    final selected = _llmApiConfigs[index];
+    _selectedLlmApiConfigId = selected.id;
+    for (final entry in _llmApiConfigs) {
+      entry.enabled = entry.id == selected.id;
+    }
+    _syncActiveLlmControllersFromSelected();
+  }
+
+  bool _isTestingLlmApiConfig(int index) {
+    if (index < 0) {
+      return _testingLlmApiKeys;
+    }
+    if (index < 0 || index >= _llmApiConfigs.length) {
+      return false;
+    }
+    return _testingLlmApiConfigIds.contains(_llmApiConfigs[index].id);
+  }
+
+  ApiKeyTestResult? _llmApiTestResultForConfig(int index) {
+    if (index < 0 || index >= _llmApiConfigs.length) {
+      return null;
+    }
+    final source = 'llm:${_llmApiConfigs[index].id}';
+    for (final result in _llmApiTestResults.reversed) {
+      if (result.source == source) {
+        return result;
+      }
+    }
+    return null;
   }
 
   // ── custom API sources ──
@@ -666,6 +1355,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
 
     setState(() {
       _runState = RunState.running;
+      _cancelRequested = false;
       _summary = const RunSummary();
       _results.clear();
       _logs.clear();
@@ -702,21 +1392,32 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         command.executable,
         args,
         runInShell: false,
-        environment: _backendEnvironment(),
+        environment:
+            _backendEnvironment(settings: settings, includeApiKeys: true),
       );
-      _process = process;
       final stdoutDone = _listenStdout(process.stdout);
       final stderrDone = _listenStderr(process.stderr);
+      _process = process;
+      if (_cancelRequested) {
+        _appendLog('任务已在启动阶段收到终止请求，正在停止后端进程...');
+        await _terminateProcessTree(process, label: '后端进程');
+      }
       final exitCode = await process.exitCode;
       await Future.wait([stdoutDone, stderrDone]);
       _process = null;
       if (!mounted) {
         return;
       }
+      final wasCancelled = _cancelRequested;
       setState(() {
-        _runState = exitCode == 0 ? RunState.completed : RunState.failed;
+        _runState = !wasCancelled && exitCode == 0
+            ? RunState.completed
+            : RunState.failed;
+        _cancelRequested = false;
       });
-      if (exitCode != 0) {
+      if (wasCancelled) {
+        _appendLog('任务已由用户提前终止。');
+      } else if (exitCode != 0) {
         _appendLog('后端进程退出码：$exitCode');
       }
       await _finishLogFile();
@@ -726,9 +1427,73 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
       }
       setState(() {
         _runState = RunState.failed;
+        _cancelRequested = false;
       });
       _appendLog('启动失败：$error');
       await _finishLogFile();
+    }
+  }
+
+  void _cancelRun() {
+    if (_runState != RunState.running || _cancelRequested) {
+      return;
+    }
+    setState(() {
+      _cancelRequested = true;
+    });
+    _appendLog('用户请求终止任务，正在停止后端进程...');
+    final process = _process;
+    if (process == null) {
+      _appendLog('后端进程尚未完成启动，将在启动后立即终止。');
+      return;
+    }
+    unawaited(_terminateProcessTree(process, label: '后端进程'));
+  }
+
+  Future<void> _terminateProcessTree(
+    Process process, {
+    required String label,
+    bool log = true,
+  }) async {
+    if (Platform.isWindows) {
+      try {
+        final result = await Process.run(
+          'taskkill',
+          ['/PID', process.pid.toString(), '/T', '/F'],
+          runInShell: false,
+        );
+        if (result.exitCode == 0) {
+          if (log) {
+            _appendLog('$label 进程树已强制终止。');
+          }
+          return;
+        }
+        final details = [
+          result.stdout.toString().trim(),
+          result.stderr.toString().trim(),
+        ].where((text) => text.isNotEmpty).join(' ');
+        if (log) {
+          _appendLog(
+            '$label 进程树终止命令返回退出码 ${result.exitCode}'
+            '${details.isEmpty ? "" : "：$details"}',
+          );
+        }
+      } catch (error) {
+        if (log) {
+          _appendLog('$label 进程树终止命令失败：$error');
+        }
+      }
+    }
+
+    try {
+      final signaled = process.kill(ProcessSignal.sigterm);
+      if (log) {
+        _appendLog(signaled ? '$label 已发送终止信号。' : '$label 终止信号发送失败，进程可能已经退出。');
+      }
+    } catch (error) {
+      if (log) {
+        _appendLog('$label 终止失败：$error');
+      }
     }
   }
 
@@ -756,6 +1521,13 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
       email: _emailController.text.trim(),
       sources: sourceKey,
       sourceOrder: [sourceKey],
+      searchMode: _searchMode,
+      doiCheck: _doiCheck,
+      llmParseMode: _llmParseMode,
+      llmProvider: _llmProvider,
+      llmModel: _llmModelController.text.trim(),
+      llmBaseUrl: _llmBaseUrlController.text.trim(),
+      llmApiKey: _llmApiKeyController.text.trim(),
       customApiSources: [source],
       useCrossref: false,
       useOpenAlex: false,
@@ -829,8 +1601,208 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     }
   }
 
+  Future<void> _testLlmApiConfig(int index) async {
+    if (_runState == RunState.running || _testingAnyApiKeys) {
+      return;
+    }
+    if (index < 0 || index >= _llmApiConfigs.length) {
+      return;
+    }
+
+    final entry = _llmApiConfigs[index];
+    final config = entry.toConfig();
+    final source = 'llm:${entry.id}';
+
+    setState(() {
+      _testingLlmApiConfigIds.add(entry.id);
+      _llmApiTestResults.removeWhere((item) => item.source == source);
+    });
+    _notifyLlmApiTestChanged();
+    _appendLog('开始测试 ${_llmConfigDisplayName(config)} 连通性（不会在日志中输出 Key 明文）');
+
+    try {
+      final result = await _probeLlmApiConfig(config);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _llmApiTestResults.removeWhere((item) => item.source == source);
+        _llmApiTestResults.add(result);
+      });
+      _appendLog(_formatApiKeyTestLog(result));
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      final result = ApiKeyTestResult(
+        source: source,
+        name: _llmConfigDisplayName(config),
+        ok: false,
+        status: 'network_error',
+        message: 'LLM 连通性测试失败：$error',
+        endpoint: _llmChatCompletionsEndpoint(config.baseUrl),
+        statusCode: '',
+        records: null,
+      );
+      setState(() {
+        _llmApiTestResults.removeWhere((item) => item.source == source);
+        _llmApiTestResults.add(result);
+      });
+      _appendLog(_formatApiKeyTestLog(result));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _testingLlmApiConfigIds.remove(entry.id);
+        });
+        _notifyLlmApiTestChanged();
+      }
+    }
+  }
+
+  Future<ApiKeyTestResult> _probeLlmApiConfig(LlmApiConfig config) async {
+    final name = _llmConfigDisplayName(config);
+    final endpoint = _llmChatCompletionsEndpoint(config.baseUrl);
+    final key = config.apiKey.trim();
+    final model = config.model.trim().isEmpty ? 'gpt-4o-mini' : config.model.trim();
+    if (key.isEmpty) {
+      return ApiKeyTestResult(
+        source: 'llm:${config.id}',
+        name: name,
+        ok: false,
+        status: 'not_configured',
+        message: '请先填写 LLM API Key。',
+        endpoint: endpoint,
+        statusCode: '',
+        records: null,
+      );
+    }
+
+    late final Uri uri;
+    try {
+      uri = Uri.parse(endpoint);
+      if (!uri.hasScheme || uri.host.isEmpty) {
+        throw const FormatException('缺少协议或主机');
+      }
+    } catch (error) {
+      return ApiKeyTestResult(
+        source: 'llm:${config.id}',
+        name: name,
+        ok: false,
+        status: 'invalid_url',
+        message: 'Base URL 格式有误：$error',
+        endpoint: endpoint,
+        statusCode: '',
+        records: null,
+      );
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final request =
+          await client.postUrl(uri).timeout(const Duration(seconds: 12));
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $key');
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.userAgentHeader, 'RefChecker/$appVersion');
+      request.add(utf8.encode(jsonEncode({
+        'model': model,
+        'messages': [
+          {
+            'role': 'user',
+            'content': 'ping',
+          }
+        ],
+        'max_tokens': 1,
+        'temperature': 0,
+      })));
+      final response =
+          await request.close().timeout(const Duration(seconds: 20));
+      final body = await response
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .join()
+          .timeout(const Duration(seconds: 10));
+      final ok = response.statusCode >= 200 && response.statusCode < 300;
+      return ApiKeyTestResult(
+        source: 'llm:${config.id}',
+        name: name,
+        ok: ok,
+        status: ok ? 'ok' : _llmHttpStatus(response.statusCode),
+        message: ok
+            ? 'LLM 连接成功，模型可响应。'
+            : _llmErrorMessage(response.statusCode, body),
+        endpoint: endpoint,
+        statusCode: response.statusCode.toString(),
+        records: null,
+      );
+    } on TimeoutException {
+      return ApiKeyTestResult(
+        source: 'llm:${config.id}',
+        name: name,
+        ok: false,
+        status: 'timeout',
+        message: '连接超时，请检查 Base URL、网络或服务状态。',
+        endpoint: endpoint,
+        statusCode: '',
+        records: null,
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  String _llmChatCompletionsEndpoint(String baseUrl) {
+    var value = baseUrl.trim();
+    if (value.isEmpty) {
+      value = 'https://api.openai.com/v1';
+    }
+    while (value.endsWith('/')) {
+      value = value.substring(0, value.length - 1);
+    }
+    final lower = value.toLowerCase();
+    if (lower.endsWith('/chat/completions')) {
+      return value;
+    }
+    return '$value/chat/completions';
+  }
+
+  String _llmConfigDisplayName(LlmApiConfig config) {
+    if (config.name.trim().isNotEmpty) {
+      return config.name.trim();
+    }
+    if (config.model.trim().isNotEmpty) {
+      return config.model.trim();
+    }
+    return 'LLM';
+  }
+
+  String _llmHttpStatus(int statusCode) {
+    return switch (statusCode) {
+      401 || 403 => 'unauthorized',
+      404 => 'not_found',
+      429 => 'rate_limited',
+      >= 500 => 'server_error',
+      _ => 'http_error',
+    };
+  }
+
+  String _llmErrorMessage(int statusCode, String body) {
+    final detail = trimStr(body.replaceAll(RegExp(r'\\s+'), ' ').trim(), 160);
+    final suffix = detail.isEmpty ? '' : '：$detail';
+    return switch (statusCode) {
+      401 || 403 => '认证失败，请检查 API Key 或服务权限$suffix',
+      404 => '接口不存在，请检查 Base URL 是否应以 /v1 结尾，或模型名称是否正确$suffix',
+      429 => '请求被限流，请稍后再试$suffix',
+      >= 500 => 'LLM 服务返回服务器错误$suffix',
+      _ => 'LLM 服务返回 HTTP $statusCode$suffix',
+    };
+  }
+
   void _notifyApiKeyTestChanged() {
     _apiKeyTestRevision.value += 1;
+  }
+
+  void _notifyLlmApiTestChanged() {
+    _llmApiTestRevision.value += 1;
   }
 
   Future<void> _listenStdout(Stream<List<int>> stream) {
@@ -968,10 +1940,13 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     final appDir = File(Platform.resolvedExecutable).parent.path;
     final executableName =
         Platform.isWindows ? 'refchecker_backend.exe' : 'refchecker_backend';
+    final buildSourceRoot =
+        p.normalize(p.join(appDir, '..', '..', '..', '..', '..'));
     final candidates = <String>[
       p.join(appDir, executableName),
       p.join(appDir, 'backend', executableName),
       p.join(Directory.current.path, 'backend', executableName),
+      p.join(buildSourceRoot, 'backend', executableName),
     ];
     if (Platform.isMacOS) {
       candidates.add(p.normalize(
@@ -984,12 +1959,22 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         return BackendCommand(executable: candidate);
       }
     }
-    final devScript = p.join(Directory.current.path, 'check_bib_crossref.py');
-    final bundledScript = p.join(appDir, 'check_bib_crossref.py');
-    final scriptPath =
-        await File(devScript).exists() ? devScript : bundledScript;
-    return BackendCommand(
-        executable: _pythonExecutable(), scriptPath: scriptPath);
+    final scriptCandidates = <String>[
+      p.join(Directory.current.path, 'check_bib_crossref.py'),
+      p.join(appDir, 'check_bib_crossref.py'),
+      p.join(buildSourceRoot, 'check_bib_crossref.py'),
+    ];
+    for (final scriptPath in scriptCandidates) {
+      if (await File(scriptPath).exists()) {
+        return BackendCommand(
+            executable: _pythonExecutable(), scriptPath: scriptPath);
+      }
+    }
+    throw StateError(
+      '未找到 RefChecker 后端程序。请确认 backend/$executableName 已随应用打包，'
+      '或从项目根目录运行。已检查：${candidates.join("；")}；'
+      '脚本候选：${scriptCandidates.join("；")}',
+    );
   }
 
   Future<BackendCommand> _httpServerCommand() async {
@@ -997,10 +1982,13 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     final executableName = Platform.isWindows
         ? 'refchecker_http_server.exe'
         : 'refchecker_http_server';
+    final buildSourceRoot =
+        p.normalize(p.join(appDir, '..', '..', '..', '..', '..'));
     final candidates = <String>[
       p.join(appDir, executableName),
       p.join(appDir, 'backend', executableName),
       p.join(Directory.current.path, 'backend', executableName),
+      p.join(buildSourceRoot, 'backend', executableName),
     ];
     if (Platform.isMacOS) {
       candidates.add(p.normalize(
@@ -1013,33 +2001,104 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         return BackendCommand(executable: candidate);
       }
     }
-    final devScript = p.join(Directory.current.path, 'refchecker_http_server.py');
-    final bundledScript = p.join(appDir, 'refchecker_http_server.py');
-    final scriptPath =
-        await File(devScript).exists() ? devScript : bundledScript;
-    return BackendCommand(
-        executable: _pythonExecutable(), scriptPath: scriptPath);
+    final scriptCandidates = <String>[
+      p.join(Directory.current.path, 'refchecker_http_server.py'),
+      p.join(appDir, 'refchecker_http_server.py'),
+      p.join(buildSourceRoot, 'refchecker_http_server.py'),
+    ];
+    for (final scriptPath in scriptCandidates) {
+      if (await File(scriptPath).exists()) {
+        return BackendCommand(
+            executable: _pythonExecutable(), scriptPath: scriptPath);
+      }
+    }
+    throw StateError(
+      '未找到 RefChecker 网页核查服务。请确认 backend/$executableName 已随应用打包，'
+      '或从项目根目录运行。已检查：${candidates.join("；")}；'
+      '脚本候选：${scriptCandidates.join("；")}',
+    );
   }
 
   Future<void> _ensureHttpServerStarted() async {
+    if (_isAppExiting) {
+      return;
+    }
+    final existingStart = _httpServerStartFuture;
+    if (existingStart != null) {
+      await existingStart;
+      return;
+    }
+    final startFuture = _ensureHttpServerStartedInternal();
+    _httpServerStartFuture = startFuture;
+    try {
+      await startFuture;
+    } finally {
+      if (_httpServerStartFuture == startFuture) {
+        _httpServerStartFuture = null;
+      }
+    }
+  }
+
+  Future<void> _ensureHttpServerStartedInternal() async {
+    if (_isAppExiting) {
+      return;
+    }
     if (_httpServerProcess != null) {
       return;
     }
     if (await _isHttpServerHealthy()) {
-      _appendLog(
-          'Claude 网页版核查服务已在 http://$_httpServerHost:$_httpServerPort 运行');
-      return;
+      _appendLog('检测到已有网页核查服务，正在重启以应用当前设置...');
+      await _requestHttpServerShutdown();
+      await _waitForHttpServerStopped();
+      if (await _isHttpServerHealthy()) {
+        _appendLog('端口 http://$_httpServerHost:$_httpServerPort 仍被占用，将复用现有服务。');
+        return;
+      }
     }
     try {
       final command = await _httpServerCommand();
+      final heartbeatPath = _httpServerHeartbeatFilePath();
+      _writeHttpServerHeartbeat(heartbeatPath);
       final args = <String>[
         if (command.scriptPath != null) command.scriptPath!,
         '--host',
         _httpServerHost,
         '--port',
         _httpServerPort.toString(),
+        '--parent-pid',
+        pid.toString(),
+        '--parent-heartbeat',
+        heartbeatPath,
       ];
       final settings = _settingsLoaded ? _currentSettings() : null;
+      if (settings != null) {
+        args.addAll([
+          '--search-mode',
+          settings.searchMode,
+          '--doi-check',
+          settings.doiCheck,
+          '--llm-parse-mode',
+          settings.llmParseMode,
+          '--llm-provider',
+          settings.llmProvider,
+          '--llm-model',
+          settings.llmModel,
+          '--llm-base-url',
+          settings.llmBaseUrl,
+        ]);
+        final customRestProfiles =
+            _customRestProfilesForBackend(settings.customApiSources);
+        if (customRestProfiles.isNotEmpty) {
+          final profilesPath = p.join(
+            Directory.systemTemp.path,
+            'refchecker_http_custom_rest_profiles_$pid.json',
+          );
+          File(profilesPath).writeAsStringSync(
+            const JsonEncoder.withIndent('  ').convert(customRestProfiles),
+          );
+          args.addAll(['--custom-rest-profiles', profilesPath]);
+        }
+      }
       final process = await Process.start(
         command.executable,
         args,
@@ -1050,24 +2109,127 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
         ),
       );
       _httpServerProcess = process;
-      _appendLog(
-          '已自动启动 Claude 网页版核查服务：http://$_httpServerHost:$_httpServerPort');
+      _startHttpServerHeartbeat(heartbeatPath);
+      _appendLog('网页核查服务已启动：http://$_httpServerHost:$_httpServerPort');
       unawaited(_listenHttpServerStream(process.stdout));
       unawaited(_listenHttpServerStream(process.stderr));
       unawaited(process.exitCode.then((exitCode) {
         if (_httpServerProcess == process) {
           _httpServerProcess = null;
+          _stopHttpServerHeartbeat(delete: true);
         }
         if (mounted && exitCode != 0) {
-          _appendLog('Claude 网页版核查服务已退出，退出码：$exitCode');
+          _appendLog('网页核查服务退出码：$exitCode');
         }
       }));
       await Future<void>.delayed(const Duration(milliseconds: 700));
       if (!await _isHttpServerHealthy()) {
-        _appendLog('Claude 网页版核查服务正在启动；浏览器扩展稍后会自动连上');
+        _appendLog('网页核查服务启动后未通过健康检查。');
       }
     } catch (error) {
-      _appendLog('Claude 网页版核查服务启动失败：$error');
+      _appendLog('网页核查服务启动失败：$error');
+    }
+  }
+
+  Future<void> _stopOwnedHttpServer() async {
+    final process = _httpServerProcess;
+    _httpServerProcess = null;
+    _stopHttpServerHeartbeat(delete: true);
+    if (process == null) {
+      return;
+    }
+    await _stopHttpServerProcess(process, log: false);
+  }
+
+  Future<void> _stopHttpServerProcess(
+    Process process, {
+    required bool log,
+  }) async {
+    _stopHttpServerHeartbeat(delete: true);
+    await _requestHttpServerShutdown();
+    try {
+      await process.exitCode.timeout(const Duration(seconds: 2));
+      return;
+    } catch (_) {
+      await _terminateProcessTree(process, label: '网页核查服务', log: log);
+    }
+    try {
+      await process.exitCode.timeout(const Duration(seconds: 2));
+    } catch (_) {
+      try {
+        process.kill(ProcessSignal.sigkill);
+      } catch (_) {}
+    }
+  }
+
+  String _httpServerHeartbeatFilePath() {
+    return p.join(
+      Directory.systemTemp.path,
+      'refchecker_http_parent_${pid}_heartbeat.txt',
+    );
+  }
+
+  void _writeHttpServerHeartbeat(String path) {
+    try {
+      final file = File(path);
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(DateTime.now().toUtc().toIso8601String());
+    } catch (_) {
+      // Heartbeat is a cleanup aid. Do not block normal app usage if writing
+      // temp files fails; PID monitoring and explicit shutdown remain active.
+    }
+  }
+
+  void _startHttpServerHeartbeat(String path) {
+    _stopHttpServerHeartbeat(delete: true);
+    _httpServerHeartbeatPath = path;
+    _writeHttpServerHeartbeat(path);
+    _httpServerHeartbeatTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _writeHttpServerHeartbeat(path),
+    );
+  }
+
+  void _stopHttpServerHeartbeat({required bool delete}) {
+    _httpServerHeartbeatTimer?.cancel();
+    _httpServerHeartbeatTimer = null;
+    final path = _httpServerHeartbeatPath;
+    _httpServerHeartbeatPath = null;
+    if (delete && path != null) {
+      try {
+        final file = File(path);
+        if (file.existsSync()) {
+          file.deleteSync();
+        }
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _requestHttpServerShutdown() async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 800);
+    try {
+      final request = await client
+          .postUrl(
+              Uri.parse('http://$_httpServerHost:$_httpServerPort/shutdown'))
+          .timeout(const Duration(seconds: 1));
+      final response =
+          await request.close().timeout(const Duration(seconds: 1));
+      await response.drain<void>();
+    } catch (_) {
+      // Older orphaned services may not support /shutdown; avoid starting a
+      // duplicate on the same port and simply reuse the existing service.
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _waitForHttpServerStopped() async {
+    for (var i = 0; i < 12; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (!await _isHttpServerHealthy()) {
+        return;
+      }
     }
   }
 
@@ -1106,12 +2268,41 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
   }
 
   RunSettings _currentSettings() {
+    final activeLlm = _selectedLlmApiEntry()?.toConfig();
+    final llmProvider = activeLlm == null
+        ? (_llmProvider.isEmpty ? 'openai-compatible' : _llmProvider)
+        : (activeLlm.provider.trim().isEmpty
+            ? 'openai-compatible'
+            : activeLlm.provider.trim());
+    final llmModel = activeLlm == null
+        ? _llmModelController.text.trim()
+        : activeLlm.model.trim();
+    final llmBaseUrl = activeLlm == null
+        ? _llmBaseUrlController.text.trim()
+        : activeLlm.baseUrl.trim();
+    final llmApiKey = activeLlm == null
+        ? _llmApiKeyController.text.trim()
+        : activeLlm.apiKey.trim();
+    final selectedLlmId = activeLlm?.id ?? _selectedLlmApiConfigId;
     return RunSettings(
       threshold: _threshold,
       delay: clampDelaySeconds(_delay),
       email: _emailController.text.trim(),
       sources: _visibleSourceOrder().where(_isSourceEnabled).join(','),
       sourceOrder: _completeSourceOrder(),
+      searchMode: _searchMode,
+      doiCheck: _doiCheck,
+      llmParseMode: _llmParseMode,
+      llmProvider: llmProvider,
+      llmModel: llmModel,
+      llmBaseUrl: llmBaseUrl,
+      llmApiKey: llmApiKey,
+      llmApiConfigs: _llmApiConfigs
+          .map((entry) => entry.toConfig().copyWith(
+                enabled: entry.id == selectedLlmId,
+              ))
+          .toList(),
+      selectedLlmApiConfigId: selectedLlmId,
       customApiSources: _customApiSources.map((e) => e.toSource()).toList(),
       useCrossref: _useCrossref,
       useOpenAlex: _useOpenAlex,
@@ -1126,7 +2317,6 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     );
   }
 
-
   Map<String, String> _backendEnvironment({
     RunSettings? settings,
     bool includeApiKeys = false,
@@ -1134,12 +2324,25 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
     final environment = <String, String>{
       'PYTHONUTF8': '1',
       'PYTHONIOENCODING': 'utf-8',
+      'REFCHECKER_APP_VERSION': appVersion,
     };
     if (includeApiKeys && settings != null) {
       for (final src in settings.customApiSources) {
         if (src.enabled && src.apiKey.isNotEmpty && src.envVar.isNotEmpty) {
           environment[src.envVar] = src.apiKey;
         }
+      }
+      if (settings.llmApiKey.isNotEmpty) {
+        environment['REFCHECKER_LLM_API_KEY'] = settings.llmApiKey;
+      }
+      if (settings.llmModel.isNotEmpty) {
+        environment['REFCHECKER_LLM_MODEL'] = settings.llmModel;
+      }
+      if (settings.llmBaseUrl.isNotEmpty) {
+        environment['REFCHECKER_LLM_BASE_URL'] = settings.llmBaseUrl;
+      }
+      if (settings.llmProvider.isNotEmpty) {
+        environment['REFCHECKER_LLM_PROVIDER'] = settings.llmProvider;
       }
     }
     return environment;
@@ -1245,6 +2448,18 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
       clampDelaySeconds(settings.delay).toStringAsFixed(2),
       '--app-version',
       appVersion,
+      '--search-mode',
+      settings.searchMode,
+      '--doi-check',
+      settings.doiCheck,
+      '--llm-parse-mode',
+      settings.llmParseMode,
+      '--llm-provider',
+      settings.llmProvider,
+      '--llm-model',
+      settings.llmModel,
+      '--llm-base-url',
+      settings.llmBaseUrl,
     ]);
     if (settings.email.isNotEmpty) {
       args.addAll(['--email', settings.email]);
@@ -1507,6 +2722,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final updateInfo = _updateDismissed ? null : _updateInfo;
     return Scaffold(
       body: SafeArea(
         child: Column(
@@ -1514,9 +2730,19 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
             HeaderBar(
               canRun: _canRun,
               runState: _runState,
+              cancelRequested: _cancelRequested,
               onRun: _startRun,
+              onCancelRun: _cancelRun,
               onOpenFile: _pickBibFile,
             ),
+            if (updateInfo != null)
+              _UpdateBanner(
+                info: updateInfo,
+                currentVersion: appVersion,
+                onViewRelease: () => _openPath(updateInfo.releaseUrl),
+                onDownload: () => _openPath(updateInfo.downloadUrl),
+                onDismiss: () => setState(() => _updateDismissed = true),
+              ),
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {
@@ -1526,7 +2752,7 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
                     outputDir: _baseOutputDir,
                     activeOutputDir: _activeOutputDir,
                     runState: _runState,
-                    testingApiKeys: _testingApiKeys,
+                    testingApiKeys: _testingAnyApiKeys,
                     apiKeyTestRevision: _apiKeyTestRevision,
                     advancedOpen: _advancedOpen,
                     threshold: _threshold,
@@ -1535,6 +2761,15 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
                     sourceOrder: _visibleSourceOrder(),
                     sourceEnabled: _isSourceEnabled,
                     sourceNames: _sourceNamesForPanel(),
+                    searchMode: _searchMode,
+                    doiCheck: _doiCheck,
+                    llmParseMode: _llmParseMode,
+                    llmModelController: _llmModelController,
+                    llmBaseUrlController: _llmBaseUrlController,
+                    llmApiKeyController: _llmApiKeyController,
+                    llmApiConfigs: _llmApiConfigs,
+                    selectedLlmApiConfigId: _selectedLlmApiConfigId,
+                    llmApiTestRevision: _llmApiTestRevision,
                     onToggleSource: (key, value) =>
                         setState(() => _setSourceEnabled(key, value)),
                     onReorderSources: _onReorderSources,
@@ -1555,6 +2790,31 @@ class _RefCheckerHomePageState extends State<RefCheckerHomePage> {
                         setState(() => _delay = clampDelaySeconds(value)),
                     onTextModeChanged: (value) =>
                         setState(() => _useTextMode = value),
+                    onSearchModeChanged: (value) {
+                      setState(() => _searchMode =
+                          value == 'parallel' ? 'parallel' : 'strict');
+                      _scheduleSaveSettings();
+                    },
+                    onDoiCheckChanged: (value) {
+                      setState(
+                          () => _doiCheck = value == 'off' ? 'off' : 'auto');
+                      _scheduleSaveSettings();
+                    },
+                    onLlmParseModeChanged: (value) {
+                      setState(() => _llmParseMode = switch (value) {
+                            'auto' => 'auto',
+                            'always' => 'always',
+                            _ => 'off',
+                          });
+                      _scheduleSaveSettings();
+                      _scheduleHttpServerRestart();
+                    },
+                    onAddLlmApiConfig: _addLlmApiConfig,
+                    onRemoveLlmApiConfig: _removeLlmApiConfig,
+                    onSelectLlmApiConfig: _selectLlmApiConfig,
+                    onTestLlmApiConfig: _testLlmApiConfig,
+                    isTestingLlmApiConfig: _isTestingLlmApiConfig,
+                    llmApiTestResultForConfig: _llmApiTestResultForConfig,
                     onSelectAllSources: _selectAllSources,
                     onDeselectAllSources: _deselectAllSources,
                     onAddCustomApiSource: _addCustomApiSource,

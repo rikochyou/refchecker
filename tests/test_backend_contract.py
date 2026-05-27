@@ -51,6 +51,7 @@ def test_verify_bib_file_jsonl_and_reports(tmp_path, monkeypatch):
             "matched_year": year,
             "doi_check": "missing_in_bib",
             "doi_reason": "BibTeX 缺少 DOI，数据库 DOI 为 10.1234/example",
+            "doi_check_status": "not_provided",
             "bib_doi": "",
             "matched_doi": "10.1234/example",
             "needs_review": "No",
@@ -115,6 +116,63 @@ def test_parse_reference_text():
     assert "Froehlich" in parsed["authors"]
     assert "and" in parsed["authors"]
     assert "Decreased interhemispheric functional connectivity" in parsed["title"]
+
+    doi_only = backend.parse_reference_text("10.1093/cercor/bhq190")
+    assert doi_only["doi"] == "10.1093/cercor/bhq190"
+    assert doi_only["title"] == ""
+
+
+def test_verify_text_doi_only_uses_doi_metadata_not_url_as_title(tmp_path, monkeypatch):
+    def fake_crossref_by_doi(doi, title, email):
+        assert title == ""
+        assert doi == "10.18653/v1/n19-1423"
+        return {
+            "found": True,
+            "matched_title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+            "similarity": 0.0,
+            "source": "CrossRef(DOI)",
+            "venue": "NAACL-HLT",
+            "year": "2019",
+            "type": "proceedings-article",
+            "authors": "Devlin, Jacob; Chang, Ming-Wei; Lee, Kenton; Toutanova, Kristina",
+            "author_list": [
+                backend.parse_author_name(given="Jacob", family="Devlin"),
+                backend.parse_author_name(given="Ming-Wei", family="Chang"),
+                backend.parse_author_name(given="Kenton", family="Lee"),
+                backend.parse_author_name(given="Kristina", family="Toutanova"),
+            ],
+            "doi": doi,
+            "url": f"https://doi.org/{doi}",
+            "reason": "",
+            "doi_exact_query": True,
+        }
+
+    def fail_title_search(*args, **kwargs):
+        raise AssertionError("DOI-only input must not be sent through title search")
+
+    monkeypatch.setattr(backend.sources, "search_crossref_by_doi", fake_crossref_by_doi)
+    monkeypatch.setattr(backend.sources, "search_crossref", fail_title_search)
+
+    result = backend.verify_text(
+        "https://doi.org/10.18653/v1/N19-1423",
+        output_dir=str(tmp_path / "out"),
+        use_openalex=False,
+        use_dblp=False,
+        use_semantic_scholar=False,
+        use_arxiv=False,
+        use_pubmed=False,
+        use_crossref=True,
+        use_url_verify=False,
+        human_output=False,
+    )
+
+    row = result["results"][0]
+    assert row["title"] == ""
+    assert row["bib_doi"] == "10.18653/v1/n19-1423"
+    assert row["source"] == "DOI exact check"
+    assert row["matched_title"].startswith("BERT:")
+    assert row["similarity"] == 1.0
+    assert row["doi_check_status"] == "matched"
 
 
 def test_apa_authors_to_bibtex():
@@ -181,6 +239,7 @@ def test_verify_docx_file_jsonl_and_reports(tmp_path, monkeypatch):
             "matched_year": year,
             "doi_check": "exact",
             "doi_reason": "DOI 一致",
+            "doi_check_status": "matched",
             "bib_doi": doi,
             "matched_doi": doi or "10.1234/test.2020",
             "needs_review": "No",
@@ -238,6 +297,7 @@ def test_product_assessment_flags_high_risk_doi_mismatch():
         "year_reason": "年份一致",
         "doi_check": "mismatch",
         "doi_reason": "DOI 不一致",
+        "doi_check_status": "not_provided",
         "bib_year": "2024",
         "matched_year": "2024",
         "bib_doi": "10.1/wrong",
@@ -270,6 +330,7 @@ def test_medium_risk_year_mismatch_is_not_mandatory_review():
         "year_reason": "年份不一致：BibTeX 2024，数据库 2023",
         "doi_check": "missing_in_bib",
         "doi_reason": "BibTeX 缺少 DOI，数据库 DOI 为 10.1/example",
+        "doi_check_status": "not_provided",
         "bib_year": "2024",
         "matched_year": "2023",
         "bib_doi": "",
@@ -365,6 +426,7 @@ def test_verify_entry_uses_semantic_scholar_fallback(monkeypatch):
     assert result["source"] == "Semantic Scholar"
     assert result["author_check"] == "exact"
     assert result["doi_check"] == "missing_in_bib"
+    assert result["search_mode"] == "strict"
 
 
 def test_verify_entry_global_arbitration_prefers_crossref_high_confidence(monkeypatch):
@@ -405,7 +467,25 @@ def test_verify_entry_global_arbitration_prefers_crossref_high_confidence(monkey
             "reason": "",
         }
 
+    def fake_crossref(title, author, year, threshold, email):
+        calls.append("crossref")
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "CrossRef",
+            "venue": "CrossRef",
+            "year": year,
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+            "url": "https://doi.org/10.1/example",
+            "reason": "",
+        }
+
     monkeypatch.setattr(backend.sources, "search_crossref_by_doi", fake_crossref_by_doi)
+    monkeypatch.setattr(backend.sources, "search_crossref", fake_crossref)
     monkeypatch.setattr(backend.sources, "search_semantic_scholar", fake_semantic)
 
     result = backend.verify_entry(
@@ -423,14 +503,16 @@ def test_verify_entry_global_arbitration_prefers_crossref_high_confidence(monkey
         use_crossref=True,
         use_url_verify=False,
         source_order=["semantic-scholar", "crossref"],
+        search_mode="parallel",
     )
 
     assert result["found"] is True
-    assert result["source"] == "CrossRef(DOI)"
+    assert result["source"] == "DOI exact check"
+    assert result["doi_check_status"] == "matched"
     assert result["candidate_count"] == 2
     assert "Semantic Scholar" in result["alternative_candidates"]
-    assert "并发核验" in result["arbitration_reason"]
-    assert set(calls) == {"semantic-scholar", "crossref-doi"}
+    assert "Parallel mode" in result["arbitration_reason"]
+    assert set(calls) == {"semantic-scholar", "crossref-doi", "crossref"}
 
 
 def test_verify_entry_uses_source_order_as_tiebreaker(monkeypatch):
@@ -484,6 +566,7 @@ def test_verify_entry_uses_source_order_as_tiebreaker(monkeypatch):
         use_crossref=True,
         use_url_verify=False,
         source_order=["semantic-scholar", "crossref"],
+        search_mode="parallel",
     )
 
     assert result["found"] is True
@@ -492,7 +575,138 @@ def test_verify_entry_uses_source_order_as_tiebreaker(monkeypatch):
     assert "CrossRef" in result["alternative_candidates"]
 
 
-def test_verify_entry_uses_crossref_doi_when_crossref_is_first(monkeypatch):
+def test_verify_entry_strict_mode_stops_after_first_high_confidence(monkeypatch):
+    calls = []
+
+    def fake_openalex(title, author, year, threshold, email):
+        calls.append("openalex")
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "OpenAlex",
+            "venue": "OpenAlex",
+            "year": year,
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+            "url": "https://openalex.org/W1",
+            "reason": "",
+        }
+
+    def fake_crossref(title, author, year, threshold, email):
+        calls.append("crossref")
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "CrossRef",
+            "year": year,
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+        }
+
+    monkeypatch.setattr(backend.sources, "search_openalex", fake_openalex)
+    monkeypatch.setattr(backend.sources, "search_crossref", fake_crossref)
+
+    result = backend.verify_entry(
+        "A Strict Order Paper",
+        "Lovelace, Ada",
+        "1843",
+        "",
+        0.85,
+        "",
+        use_openalex=True,
+        use_dblp=False,
+        use_semantic_scholar=False,
+        use_arxiv=False,
+        use_pubmed=False,
+        use_crossref=True,
+        use_url_verify=False,
+        source_order=["openalex", "crossref"],
+        search_mode="strict",
+    )
+
+    assert result["found"] is True
+    assert result["source"] == "OpenAlex"
+    assert calls == ["openalex"]
+    assert result["source_order"] == "OpenAlex -> CrossRef"
+    assert "Strict mode" in result["arbitration_reason"]
+
+
+def test_verify_entry_doi_precheck_then_strict_source_order(monkeypatch):
+    calls = []
+
+    def fake_crossref_by_doi(doi, title, email):
+        calls.append("crossref-doi")
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "CrossRef(DOI)",
+            "venue": "CrossRef",
+            "year": "1843",
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": doi,
+            "url": f"https://doi.org/{doi}",
+            "reason": "",
+            "doi_exact_query": True,
+        }
+
+    def fake_openalex(title, author, year, threshold, email):
+        calls.append("openalex")
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "OpenAlex",
+            "venue": "OpenAlex",
+            "year": year,
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+            "url": "https://openalex.org/W1",
+            "reason": "",
+        }
+
+    def fake_crossref(title, author, year, threshold, email):
+        calls.append("crossref")
+        return {"found": False, "similarity": 0.0, "reason": "should not be reached"}
+
+    monkeypatch.setattr(backend.sources, "search_crossref_by_doi", fake_crossref_by_doi)
+    monkeypatch.setattr(backend.sources, "search_openalex", fake_openalex)
+    monkeypatch.setattr(backend.sources, "search_crossref", fake_crossref)
+
+    result = backend.verify_entry(
+        "A Strict DOI Paper",
+        "Lovelace, Ada",
+        "1843",
+        "10.1/example",
+        0.85,
+        "",
+        use_openalex=True,
+        use_dblp=False,
+        use_semantic_scholar=False,
+        use_arxiv=False,
+        use_pubmed=False,
+        use_crossref=True,
+        use_url_verify=False,
+        source_order=["openalex", "crossref"],
+        search_mode="strict",
+    )
+
+    assert calls == ["crossref-doi", "openalex"]
+    assert result["doi_check_status"] == "matched"
+    assert result["source"] == "OpenAlex"
+    assert result["source_order"] == "OpenAlex -> CrossRef"
+    assert "DOI exact check" in result["actual_query_trace"]
+
+
+def test_verify_entry_runs_doi_precheck_then_crossref_source_when_crossref_is_first(monkeypatch):
     calls = []
 
     def fake_crossref_by_doi(doi, title, email):
@@ -517,7 +731,25 @@ def test_verify_entry_uses_crossref_doi_when_crossref_is_first(monkeypatch):
         calls.append("semantic-scholar")
         return {"found": False, "similarity": 0.0, "reason": "not reached"}
 
+    def fake_crossref(title, author, year, threshold, email):
+        calls.append("crossref")
+        return {
+            "found": True,
+            "matched_title": title,
+            "similarity": 1.0,
+            "source": "CrossRef",
+            "venue": "CrossRef",
+            "year": year,
+            "type": "journal-article",
+            "authors": "Ada Lovelace",
+            "author_list": [backend.parse_author_name(given="Ada", family="Lovelace")],
+            "doi": "10.1/example",
+            "url": "https://doi.org/10.1/example",
+            "reason": "",
+        }
+
     monkeypatch.setattr(backend.sources, "search_crossref_by_doi", fake_crossref_by_doi)
+    monkeypatch.setattr(backend.sources, "search_crossref", fake_crossref)
     monkeypatch.setattr(backend.sources, "search_semantic_scholar", fake_semantic)
 
     result = backend.verify_entry(
@@ -538,8 +770,9 @@ def test_verify_entry_uses_crossref_doi_when_crossref_is_first(monkeypatch):
     )
 
     assert result["found"] is True
-    assert result["source"] == "CrossRef(DOI)"
-    assert "crossref-doi" in calls
+    assert result["source"] == "CrossRef"
+    assert result["doi_check_status"] == "matched"
+    assert calls == ["crossref-doi", "crossref"]
 
 
 def test_source_selection_aliases_and_api_key_source(monkeypatch):

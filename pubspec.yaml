@@ -1,7 +1,7 @@
 name: refchecker_desktop
 description: A Flutter desktop UI for the RefChecker BibTeX verification backend.
 publish_to: "none"
-version: 1.2.0-beta.1
+version: 1.2.0
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

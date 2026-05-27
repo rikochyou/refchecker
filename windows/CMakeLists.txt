@@ -87,6 +87,17 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+# Bundle the Python backend executables beside the Flutter Windows runner so
+# running build\windows\x64\runner\Release\refchecker_desktop.exe directly has
+# the same backend/HTTP-bridge layout as the portable package.
+set(REFCHECKER_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+install(FILES
+  "${REFCHECKER_PROJECT_ROOT}/backend/refchecker_backend.exe"
+  "${REFCHECKER_PROJECT_ROOT}/backend/refchecker_http_server.exe"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}/backend"
+  OPTIONAL
+  COMPONENT Runtime)
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

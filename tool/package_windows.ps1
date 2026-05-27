@@ -1,5 +1,6 @@
 param(
-  [string]$Version = "1.2.0-beta.1",
+  [string]$Version = "",
+  [switch]$ExactVersion,
   [string]$OutputRoot = "",
   [switch]$SkipBackend,
   [switch]$SkipFlutter,
@@ -24,6 +25,174 @@ function Assert-LastExitCode {
   if ($LASTEXITCODE -ne 0) {
     throw "$Message (exit code $LASTEXITCODE)"
   }
+}
+
+function Get-DefaultBaseVersion {
+  param([string]$RootPath)
+
+  $versionFile = Join-Path $RootPath "refchecker\version.py"
+  if (Test-Path -LiteralPath $versionFile) {
+    $match = Select-String -LiteralPath $versionFile -Pattern 'DEFAULT_APP_VERSION\s*=\s*"([^"]+)"' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($match -and $match.Matches.Count -gt 0) {
+      return $match.Matches[0].Groups[1].Value
+    }
+    $match = Select-String -LiteralPath $versionFile -Pattern 'APP_VERSION\s*=\s*"([^"]+)"' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($match -and $match.Matches.Count -gt 0) {
+      return $match.Matches[0].Groups[1].Value
+    }
+  }
+
+  $pubspec = Join-Path $RootPath "pubspec.yaml"
+  if (Test-Path -LiteralPath $pubspec) {
+    $match = Select-String -LiteralPath $pubspec -Pattern '^version:\s*(\S+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($match -and $match.Matches.Count -gt 0) {
+      return $match.Matches[0].Groups[1].Value
+    }
+  }
+
+  return "0.0.0"
+}
+
+function Get-ChromeExtensionVersion {
+  param(
+    [string]$BaseVersion,
+    [int]$BuildNumber
+  )
+
+  if ($BuildNumber -lt 0 -or $BuildNumber -gt 65535) {
+    throw "Chrome extension build number must be between 0 and 65535, got $BuildNumber"
+  }
+  $match = [regex]::Match($BaseVersion, '^(\d+)\.(\d+)\.(\d+)')
+  if (-not $match.Success) {
+    return "0.0.0.$BuildNumber"
+  }
+  return "$($match.Groups[1].Value).$($match.Groups[2].Value).$($match.Groups[3].Value).$BuildNumber"
+}
+
+function Get-BuildStatePath {
+  param([string]$RootPath)
+  return Join-Path $RootPath ".refchecker_build_state.json"
+}
+
+function Read-BuildCounters {
+  param([string]$RootPath)
+
+  $statePath = Get-BuildStatePath -RootPath $RootPath
+  $counters = @{}
+  if (-not (Test-Path -LiteralPath $statePath)) {
+    return $counters
+  }
+
+  try {
+    $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    if ($state.counters) {
+      foreach ($property in $state.counters.PSObject.Properties) {
+        $counters[$property.Name] = [int]$property.Value
+      }
+    }
+  } catch {
+    Write-Warning "Cannot read $statePath; version counter will be inferred from existing packages."
+  }
+  return $counters
+}
+
+function Get-MaxExistingBuildNumber {
+  param(
+    [string]$OutputRoot,
+    [string]$BaseVersion
+  )
+
+  $safeBase = $BaseVersion -replace '[^A-Za-z0-9._-]', '_'
+  $pattern = '^RefChecker_portable_v' + [regex]::Escape($safeBase) + '\.(\d+)(?:\.zip)?$'
+  $max = -1
+  if (-not (Test-Path -LiteralPath $OutputRoot)) {
+    return $max
+  }
+
+  foreach ($item in Get-ChildItem -LiteralPath $OutputRoot -Force) {
+    $match = [regex]::Match($item.Name, $pattern)
+    if ($match.Success) {
+      $value = [int]$match.Groups[1].Value
+      if ($value -gt $max) {
+        $max = $value
+      }
+    }
+  }
+  return $max
+}
+
+function Get-NextPackageVersion {
+  param(
+    [string]$RootPath,
+    [string]$OutputRoot,
+    [string]$BaseVersion
+  )
+
+  $counters = Read-BuildCounters -RootPath $RootPath
+  $stateMax = if ($counters.ContainsKey($BaseVersion)) { [int]$counters[$BaseVersion] } else { -1 }
+  $packageMax = Get-MaxExistingBuildNumber -OutputRoot $OutputRoot -BaseVersion $BaseVersion
+  $buildNumber = [Math]::Max($stateMax, $packageMax) + 1
+
+  while ($true) {
+    $candidateVersion = "$BaseVersion.$buildNumber"
+    $safeCandidate = $candidateVersion -replace '[^A-Za-z0-9._-]', '_'
+    $candidateDir = Join-Path $OutputRoot "RefChecker_portable_v${safeCandidate}"
+    $candidateZip = "$candidateDir.zip"
+    if (-not (Test-Path -LiteralPath $candidateDir) -and -not (Test-Path -LiteralPath $candidateZip)) {
+      return [pscustomobject]@{
+        Version = $candidateVersion
+        BuildNumber = $buildNumber
+      }
+    }
+    $buildNumber += 1
+  }
+}
+
+function Save-BuildCounter {
+  param(
+    [string]$RootPath,
+    [string]$BaseVersion,
+    [int]$BuildNumber,
+    [string]$PackageVersion
+  )
+
+  $statePath = Get-BuildStatePath -RootPath $RootPath
+  $counters = Read-BuildCounters -RootPath $RootPath
+  $counters[$BaseVersion] = $BuildNumber
+
+  $orderedCounters = [ordered]@{}
+  foreach ($key in ($counters.Keys | Sort-Object)) {
+    $orderedCounters[$key] = $counters[$key]
+  }
+
+  $state = [ordered]@{
+    counters = $orderedCounters
+    last_version = $PackageVersion
+    last_built_at = (Get-Date -Format o)
+  }
+  $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+}
+
+function Set-PackagedBrowserExtensionVersion {
+  param(
+    [string]$ExtensionDir,
+    [string]$PackageVersion,
+    [string]$ChromeVersion
+  )
+
+  $manifestPath = Join-Path $ExtensionDir "manifest.json"
+  if (-not (Test-Path -LiteralPath $manifestPath)) {
+    return
+  }
+
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  $manifest.version = $ChromeVersion
+  if ($manifest.PSObject.Properties.Name -contains "version_name") {
+    $manifest.version_name = $PackageVersion
+  } else {
+    $manifest | Add-Member -NotePropertyName "version_name" -NotePropertyValue $PackageVersion
+  }
+  $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 }
 
 function Invoke-WithRefCheckerSecretEnvironmentCleared {
@@ -103,9 +272,31 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 $OutputRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot)
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 
+$buildTime = Get-Date
+$stamp = $buildTime.ToString("yyyyMMdd_HHmmss_fff")
+$baseVersion = if ([string]::IsNullOrWhiteSpace($Version)) {
+  Get-DefaultBaseVersion -RootPath $root
+} else {
+  $Version.Trim()
+}
+if ([string]::IsNullOrWhiteSpace($baseVersion)) {
+  throw "Version cannot be empty"
+}
+if ($ExactVersion) {
+  $Version = $baseVersion
+  $exactBuildMatch = [regex]::Match($Version, '\.(\d+)$')
+  $packageBuildNumber = if ($exactBuildMatch.Success) { [int]$exactBuildMatch.Groups[1].Value } else { 0 }
+} else {
+  if ($baseVersion.Contains("+")) {
+    throw "Base version should not include '+'. Use -ExactVersion to package an exact version string."
+  }
+  $nextVersion = Get-NextPackageVersion -RootPath $root -OutputRoot $OutputRoot -BaseVersion $baseVersion
+  $Version = $nextVersion.Version
+  $packageBuildNumber = [int]$nextVersion.BuildNumber
+}
+$chromeExtensionVersion = Get-ChromeExtensionVersion -BaseVersion $baseVersion -BuildNumber $packageBuildNumber
 $safeVersion = $Version -replace '[^A-Za-z0-9._-]', '_'
-$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$packageDir = Join-Path $OutputRoot "RefChecker_portable_v${safeVersion}_$stamp"
+$packageDir = Join-Path $OutputRoot "RefChecker_portable_v${safeVersion}"
 $zipPath = "$packageDir.zip"
 
 $venvPython = Join-Path $root ".venv_build\Scripts\python.exe"
@@ -116,7 +307,9 @@ $releaseDir = Join-Path $root "build\windows\x64\runner\Release"
 
 Write-Host "RefChecker Windows packaging"
 Write-Host "Root       : $root"
+Write-Host "Base       : $baseVersion"
 Write-Host "Version    : $Version"
+Write-Host "Build no.  : $packageBuildNumber"
 Write-Host "Python     : $python"
 Write-Host "Output root: $OutputRoot"
 
@@ -148,8 +341,25 @@ if (-not (Test-Path -LiteralPath $httpServerExe)) {
 
 if (-not $SkipFlutter) {
   Invoke-Step "Build Flutter Windows release" {
-    flutter build windows --release --dart-define "APP_VERSION=$Version"
-    Assert-LastExitCode "Flutter Windows build failed"
+    # Some local Flutter SDK builds have a Windows batch typo that invokes
+    # "$git rev-parse HEAD" while preparing flutter_tools. If "$git" cannot be
+    # resolved, flutter.bat can spin forever in its acquire_lock retry loop
+    # before Dart/MSBuild ever start. Provide a narrow, temporary shim so the
+    # SDK batch file resolves "$git" to the real git.exe without modifying the
+    # user's Flutter installation.
+    $flutterShimDir = Join-Path ([System.IO.Path]::GetTempPath()) "refchecker_flutter_cmd_shim_$stamp"
+    New-Item -ItemType Directory -Force -Path $flutterShimDir | Out-Null
+    $gitShimPath = Join-Path $flutterShimDir '$git.cmd'
+    Set-Content -LiteralPath $gitShimPath -Encoding ASCII -Value "@echo off`r`ngit.exe %*`r`n"
+    $oldPath = $env:PATH
+    try {
+      $env:PATH = "$flutterShimDir;$oldPath"
+      flutter build windows --release --dart-define "APP_VERSION=$Version"
+      Assert-LastExitCode "Flutter Windows build failed"
+    } finally {
+      $env:PATH = $oldPath
+      Remove-Item -LiteralPath $flutterShimDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 } else {
   Write-Host "Skipping Flutter build"
@@ -170,29 +380,53 @@ Invoke-Step "Assemble portable directory" {
   New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "backend") | Out-Null
   Copy-Item -LiteralPath $backendExe -Destination (Join-Path $packageDir "backend\refchecker_backend.exe") -Force
   Copy-Item -LiteralPath $httpServerExe -Destination (Join-Path $packageDir "backend\refchecker_http_server.exe") -Force
+  Set-Content -LiteralPath (Join-Path $packageDir "VERSION.txt") -Encoding UTF8 -Value $Version
+  Set-Content -LiteralPath (Join-Path $packageDir "backend\VERSION.txt") -Encoding UTF8 -Value $Version
   if (Test-Path -LiteralPath (Join-Path $root "browser_extension\refchecker_claude")) {
     New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "browser_extension") | Out-Null
     Copy-Item -LiteralPath (Join-Path $root "browser_extension\refchecker_claude") -Destination (Join-Path $packageDir "browser_extension") -Recurse -Force
+    Set-PackagedBrowserExtensionVersion `
+      -ExtensionDir (Join-Path $packageDir "browser_extension\refchecker_claude") `
+      -PackageVersion $Version `
+      -ChromeVersion $chromeExtensionVersion
   }
-  foreach ($docName in @("README.md", "CHANGELOG.md", "BROWSER_EXTENSION_CLAUDE_WEB.md", "MCP_CLAUDE_DESKTOP.md", "RELEASE_NOTES_v1.2.0-beta.1.md")) {
+  foreach ($docName in @("README.md", "CHANGELOG.md", "BROWSER_EXTENSION_CLAUDE_WEB.md", "CUSTOM_REST_BRAVE_SEARCH.md", "MCP_CLAUDE_DESKTOP.md", "RELEASE_NOTES_v1.2.0.md", "RELEASE_NOTES_v1.2.0-beta.1.md")) {
     $docPath = Join-Path $root $docName
     if (Test-Path -LiteralPath $docPath) {
       Copy-Item -LiteralPath $docPath -Destination (Join-Path $packageDir $docName) -Force
     }
   }
+  $braveExample = Join-Path $root "examples\brave_search_custom_rest_profile.example.json"
+  if (Test-Path -LiteralPath $braveExample) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "examples") | Out-Null
+    Copy-Item -LiteralPath $braveExample -Destination (Join-Path $packageDir "examples\brave_search_custom_rest_profile.example.json") -Force
+  }
 
   $manifest = @(
     "RefChecker portable package",
     "Version: $Version",
+    "BaseVersion: $baseVersion",
+    "BuildNumber: $packageBuildNumber",
+    "ChromeExtensionVersion: $chromeExtensionVersion",
     "BuiltAt: $(Get-Date -Format o)",
     "Frontend: refchecker_desktop.exe",
     "Backend: backend/refchecker_backend.exe",
     "Browser extension HTTP bridge: backend/refchecker_http_server.exe",
     "Claude web browser extension: browser_extension/refchecker_claude",
+    "Brave custom REST example: examples/brave_search_custom_rest_profile.example.json",
     "",
     "Privacy: local settings and API keys are not copied into this package."
   ) -join [Environment]::NewLine
   Set-Content -LiteralPath (Join-Path $packageDir "PACKAGE_MANIFEST.txt") -Encoding UTF8 -Value $manifest
+
+  $versionMetadata = [ordered]@{
+    package_version = $Version
+    base_version = $baseVersion
+    build_number = $packageBuildNumber
+    built_at = (Get-Date -Format o)
+    chrome_extension_version = $chromeExtensionVersion
+  }
+  $versionMetadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $packageDir "PACKAGE_VERSION.json") -Encoding UTF8
 
   $privacy = @(
     "RefChecker package privacy note",
@@ -263,6 +497,10 @@ if (-not $NoZip) {
     }
     Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath -Force
   }
+}
+
+if (-not $ExactVersion) {
+  Save-BuildCounter -RootPath $root -BaseVersion $baseVersion -BuildNumber $packageBuildNumber -PackageVersion $Version
 }
 
 Write-Host ""

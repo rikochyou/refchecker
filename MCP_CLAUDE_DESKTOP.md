@@ -86,9 +86,22 @@ Claude 可以传给工具的常用参数：
 - `threshold`：标题相似度阈值，默认 `0.85`。
 - `email`：用于 CrossRef/OpenAlex/NCBI 的 User-Agent/mailto。
 - `sources`：数据源优先级，例如 `crossref,openalex,semantic-scholar,pubmed`。
+- `search_mode` / `doi_check`：搜索模式和 DOI 前置核验策略。
+- `llm_parse_mode`：可选 `off|auto|always`。启用后只用 LLM 提取引用字段，不判断真伪；API Key 可通过 `llm_api_key` 或环境变量 `REFCHECKER_LLM_API_KEY` 提供。
 - `disabled_sources`：禁用某些源，例如 `["url"]`。
 - `springer_api_key` / `ieee_api_key` / `core_api_key`：也可用环境变量配置。
 - `custom_rest_profiles`：自定义 REST API Profile JSON 文件路径。
+
+### Brave / Web Evidence 自定义源
+
+如果 `custom_rest_profiles` 中包含 Brave Search/Research API 这类 `evidenceType: "web"` 的 Profile，MCP 工具会把它当作辅助网页证据源。返回结果中可能包含网页标题、URL 和摘要，适合让 Claude 提醒用户打开页面人工确认；它不应被当作结构化文献元数据，也不会替代 DOI/CrossRef/OpenAlex 等核验。
+
+Brave 配置示例见：
+
+```text
+CUSTOM_REST_BRAVE_SEARCH.md
+examples\brave_search_custom_rest_profile.example.json
+```
 
 ## 6. 本地自测
 

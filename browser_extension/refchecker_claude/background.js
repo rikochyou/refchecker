@@ -3,6 +3,9 @@ const DEFAULT_SETTINGS = {
   threshold: 0.85,
   outputDir: '',
   sources: '',
+  searchMode: 'strict',
+  doiCheck: 'auto',
+  llmParseMode: 'off',
   enableFloatButton: true,
 };
 const KNOWN_SOURCES = [
@@ -163,6 +166,9 @@ async function callRefChecker(text, settings, context = {}) {
         threshold: Number(settings.threshold || DEFAULT_SETTINGS.threshold),
         output_dir: settings.outputDir || '',
         sources: settings.sources || '',
+        search_mode: settings.searchMode || DEFAULT_SETTINGS.searchMode,
+        doi_check: settings.doiCheck || DEFAULT_SETTINGS.doiCheck,
+        llm_parse_mode: settings.llmParseMode || DEFAULT_SETTINGS.llmParseMode,
         disabled_sources: selectedSources.length
           ? KNOWN_SOURCES.filter((source) => !selectedSources.includes(source))
           : [],

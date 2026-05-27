@@ -59,7 +59,7 @@ def clean_doi(doi: str) -> str:
     d = strip_latex(str(doi)).strip()
     d = re.sub(r"^https?://(dx\.)?doi\.org/", "", d, flags=re.I)
     d = re.sub(r"^doi:\s*", "", d, flags=re.I)
-    d = d.strip().strip(".;,")
+    d = d.strip().strip(".;,，。；、)）]】}>")
     return d.lower()
 
 

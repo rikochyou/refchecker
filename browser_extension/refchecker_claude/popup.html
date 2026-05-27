@@ -22,7 +22,8 @@
       color: #52615a;
     }
     input,
-    textarea {
+    textarea,
+    select {
       width: 100%;
       box-sizing: border-box;
       border: 1px solid #cfd8cf;
@@ -108,12 +109,28 @@
       background: #fff;
       color: #35413b;
       font-size: 12px;
+      transition: border-color .12s ease, background .12s ease, transform .12s ease;
     }
     .source-chip.selected {
       border-color: #1f7a6d;
       background: #e9f7ef;
       color: #15584d;
+      cursor: grab;
       font-weight: 650;
+    }
+    .source-chip.dragging {
+      opacity: .52;
+      transform: scale(.99);
+      cursor: grabbing;
+    }
+    .source-chip.drag-over {
+      border-color: #1f7a6d;
+    }
+    .source-chip.drag-over-before {
+      box-shadow: inset 2px 0 0 #1f7a6d;
+    }
+    .source-chip.drag-over-after {
+      box-shadow: inset -2px 0 0 #1f7a6d;
     }
     .source-chip .order {
       display: inline-flex;
@@ -161,8 +178,22 @@
   <label for="threshold">标题相似度阈值</label>
   <input id="threshold" type="number" min="0" max="1" step="0.01">
 
+  <label for="searchMode">搜索模式</label>
+  <select id="searchMode">
+    <option value="strict">严格顺序（默认）</option>
+    <option value="parallel">快速并发</option>
+  </select>
+
+  <label for="llmParseMode">文献解析方式</label>
+  <select id="llmParseMode">
+    <option value="off">规则解析（默认）</option>
+    <option value="auto">LLM 优先：先用大模型解析，缺字段时回退规则</option>
+    <option value="always">总是 LLM</option>
+  </select>
+  <div class="source-help">与桌面端一致：启用 LLM 后会先提取标题、作者、年份、DOI、URL；LLM 未解析出的字段会保留本地规则结果。大模型不判断文献真伪；API Key 在 RefChecker 桌面端或本地服务环境变量中配置，插件不保存 Key。</div>
+
   <label>数据源优先级（可选）</label>
-  <div class="source-help">点击标签选择/取消；标签上的数字就是查询优先级。Springer、IEEE、CORE 需要先配置 API Key。</div>
+  <div id="sourceHelp" class="source-help">拖拽带数字的小标签调整优先级；单击小标签可加入/退出搜索链。Springer、IEEE、CORE 需要先配置 API Key。</div>
   <div class="source-toolbar">
     <button id="recommendedSources" type="button">推荐组合</button>
     <button id="allSources" type="button">全部来源</button>

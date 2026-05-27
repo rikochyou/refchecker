@@ -52,6 +52,7 @@ class CustomApiSourceEntry {
   final TextEditingController urlPathController;
   final TextEditingController venuePathController;
   final TextEditingController typePathController;
+  final ValueNotifier<bool> showKeyNotifier = ValueNotifier<bool>(false);
   bool enabled;
   bool searchEnabled;
 
@@ -108,6 +109,47 @@ class CustomApiSourceEntry {
     urlPathController.dispose();
     venuePathController.dispose();
     typePathController.dispose();
+    showKeyNotifier.dispose();
+  }
+}
+
+class LlmApiConfigEntry {
+  LlmApiConfigEntry({
+    required this.id,
+    required this.nameController,
+    required this.providerController,
+    required this.modelController,
+    required this.baseUrlController,
+    required this.apiKeyController,
+    this.enabled = false,
+  });
+
+  final String id;
+  final TextEditingController nameController;
+  final TextEditingController providerController;
+  final TextEditingController modelController;
+  final TextEditingController baseUrlController;
+  final TextEditingController apiKeyController;
+  bool enabled;
+
+  LlmApiConfig toConfig() => LlmApiConfig(
+        id: id,
+        name: nameController.text.trim(),
+        provider: providerController.text.trim().isEmpty
+            ? 'openai-compatible'
+            : providerController.text.trim(),
+        model: modelController.text.trim(),
+        baseUrl: baseUrlController.text.trim(),
+        apiKey: apiKeyController.text.trim(),
+        enabled: enabled,
+      );
+
+  void dispose() {
+    nameController.dispose();
+    providerController.dispose();
+    modelController.dispose();
+    baseUrlController.dispose();
+    apiKeyController.dispose();
   }
 }
 
@@ -127,6 +169,15 @@ class ControlPanel extends StatelessWidget {
     required this.sourceOrder,
     required this.sourceEnabled,
     required this.sourceNames,
+    required this.searchMode,
+    required this.doiCheck,
+    required this.llmParseMode,
+    required this.llmModelController,
+    required this.llmBaseUrlController,
+    required this.llmApiKeyController,
+    required this.llmApiConfigs,
+    required this.selectedLlmApiConfigId,
+    required this.llmApiTestRevision,
     required this.onToggleSource,
     required this.onReorderSources,
     required this.customApiSources,
@@ -141,6 +192,15 @@ class ControlPanel extends StatelessWidget {
     required this.onThresholdChanged,
     required this.onDelayChanged,
     required this.onTextModeChanged,
+    required this.onSearchModeChanged,
+    required this.onDoiCheckChanged,
+    required this.onLlmParseModeChanged,
+    required this.onAddLlmApiConfig,
+    required this.onRemoveLlmApiConfig,
+    required this.onSelectLlmApiConfig,
+    required this.onTestLlmApiConfig,
+    required this.isTestingLlmApiConfig,
+    required this.llmApiTestResultForConfig,
     required this.onSelectAllSources,
     required this.onDeselectAllSources,
     required this.onAddCustomApiSource,
@@ -161,6 +221,15 @@ class ControlPanel extends StatelessWidget {
   final List<String> sourceOrder;
   final bool Function(String) sourceEnabled;
   final Map<String, String> sourceNames;
+  final String searchMode;
+  final String doiCheck;
+  final String llmParseMode;
+  final TextEditingController llmModelController;
+  final TextEditingController llmBaseUrlController;
+  final TextEditingController llmApiKeyController;
+  final List<LlmApiConfigEntry> llmApiConfigs;
+  final String selectedLlmApiConfigId;
+  final ValueListenable<int> llmApiTestRevision;
   final void Function(String, bool) onToggleSource;
   final void Function(int, int) onReorderSources;
   final List<CustomApiSourceEntry> customApiSources;
@@ -175,6 +244,15 @@ class ControlPanel extends StatelessWidget {
   final ValueChanged<double> onThresholdChanged;
   final ValueChanged<double> onDelayChanged;
   final ValueChanged<bool> onTextModeChanged;
+  final ValueChanged<String> onSearchModeChanged;
+  final ValueChanged<String> onDoiCheckChanged;
+  final ValueChanged<String> onLlmParseModeChanged;
+  final VoidCallback onAddLlmApiConfig;
+  final ValueChanged<int> onRemoveLlmApiConfig;
+  final ValueChanged<int> onSelectLlmApiConfig;
+  final ValueChanged<int> onTestLlmApiConfig;
+  final bool Function(int) isTestingLlmApiConfig;
+  final ApiKeyTestResult? Function(int) llmApiTestResultForConfig;
   final VoidCallback onSelectAllSources;
   final VoidCallback onDeselectAllSources;
   final VoidCallback onAddCustomApiSource;
@@ -304,6 +382,102 @@ class ControlPanel extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(
+                    value: 'strict',
+                    label: Text('严格顺序'),
+                    icon: Icon(Icons.format_list_numbered_rounded),
+                  ),
+                  ButtonSegment(
+                    value: 'parallel',
+                    label: Text('快速并发'),
+                    icon: Icon(Icons.bolt_outlined),
+                  ),
+                ],
+                selected: {searchMode == 'parallel' ? 'parallel' : 'strict'},
+                onSelectionChanged: disabled
+                    ? null
+                    : (selected) => onSearchModeChanged(selected.first),
+              ),
+              const SizedBox(height: 8),
+              SwitchListTile(
+                value: doiCheck != 'off',
+                onChanged: disabled
+                    ? null
+                    : (value) => onDoiCheckChanged(value ? 'auto' : 'off'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('有 DOI 时先做 DOI 精确核验'),
+                subtitle: const Text('该步骤独立于搜索链，不会让 CrossRef 抢占用户排序。'),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '文献字段解析',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(
+                    value: 'off',
+                    label: Text('规则解析'),
+                    icon: Icon(Icons.rule_rounded),
+                  ),
+                  ButtonSegment(
+                    value: 'auto',
+                    label: Text('LLM 优先'),
+                    icon: Icon(Icons.auto_fix_high_rounded),
+                  ),
+                  ButtonSegment(
+                    value: 'always',
+                    label: Text('总是 LLM'),
+                    icon: Icon(Icons.psychology_alt_outlined),
+                  ),
+                ],
+                selected: {
+                  switch (llmParseMode) {
+                    'auto' => 'auto',
+                    'always' => 'always',
+                    _ => 'off',
+                  }
+                },
+                onSelectionChanged: disabled
+                    ? null
+                    : (selected) => onLlmParseModeChanged(selected.first),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                llmParseMode == 'off'
+                    ? '默认只用本地规则，不上传文本，速度最快。'
+                    : '已启用 LLM 优先解析：先让大模型提取标题、作者、年份、DOI、URL；LLM 解析不出字段时自动保留本地规则结果。',
+                style: const TextStyle(
+                    color: Color(0xff596158), fontSize: 11, height: 1.35),
+              ),
+              const SizedBox(height: 8),
+              _LlmApiConfigSummary(
+                parseMode: llmParseMode,
+                modelController: llmModelController,
+                baseUrlController: llmBaseUrlController,
+                apiKeyController: llmApiKeyController,
+                llmApiConfigs: llmApiConfigs,
+                selectedLlmApiConfigId: selectedLlmApiConfigId,
+                onConfigure: disabled
+                    ? null
+                    : () => _showLlmApiDialog(
+                          context,
+                          disabled: runState == RunState.running,
+                          entries: llmApiConfigs,
+                          selectedId: selectedLlmApiConfigId,
+                          apiTestRevision: llmApiTestRevision,
+                          onAdd: onAddLlmApiConfig,
+                          onRemove: onRemoveLlmApiConfig,
+                          onSelect: onSelectLlmApiConfig,
+                          onTest: onTestLlmApiConfig,
+                          isTesting: isTestingLlmApiConfig,
+                          testResultForConfig: llmApiTestResultForConfig,
+                        ),
+              ),
+              const SizedBox(height: 8),
               Row(
                 children: [
                   const Icon(Icons.dns_outlined,
@@ -325,8 +499,10 @@ class ControlPanel extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 6),
-              const Text(
-                '拖拽排序决定优先查询顺序；系统会并发核验多个来源并按匹配质量仲裁，质量接近时才按排序优先。',
+              Text(
+                searchMode == 'parallel'
+                    ? '快速并发：多源同时查询，排序仅在证据接近时生效。'
+                    : '严格顺序：按此顺序逐个查询，高可信命中后停止。',
                 style: TextStyle(
                     color: Color(0xff596158), fontSize: 11, height: 1.35),
               ),
@@ -471,6 +647,817 @@ class _MiniButton extends StatelessWidget {
       ),
     );
   }
+}
+
+
+class _LlmApiConfigSummary extends StatelessWidget {
+  const _LlmApiConfigSummary({
+    required this.parseMode,
+    required this.modelController,
+    required this.baseUrlController,
+    required this.apiKeyController,
+    required this.llmApiConfigs,
+    required this.selectedLlmApiConfigId,
+    required this.onConfigure,
+  });
+
+  final String parseMode;
+  final TextEditingController modelController;
+  final TextEditingController baseUrlController;
+  final TextEditingController apiKeyController;
+  final List<LlmApiConfigEntry> llmApiConfigs;
+  final String selectedLlmApiConfigId;
+  final VoidCallback? onConfigure;
+
+  @override
+  Widget build(BuildContext context) {
+    final listenables = <Listenable>[
+      modelController,
+      baseUrlController,
+      apiKeyController,
+      for (final entry in llmApiConfigs) ...[
+        entry.nameController,
+        entry.providerController,
+        entry.modelController,
+        entry.baseUrlController,
+        entry.apiKeyController,
+      ],
+    ];
+    return AnimatedBuilder(
+      animation: Listenable.merge(listenables),
+      builder: (context, _) {
+        final selected = _selectedLlmEntry(llmApiConfigs, selectedLlmApiConfigId);
+        final name = _llmDisplayName(selected);
+        final model = selected?.modelController.text.trim() ??
+            modelController.text.trim();
+        final baseUrl = selected?.baseUrlController.text.trim() ??
+            baseUrlController.text.trim();
+        final hasKey = (selected?.apiKeyController.text.trim() ??
+                apiKeyController.text.trim())
+            .isNotEmpty;
+        final enabled = parseMode != 'off';
+        final accent =
+            enabled ? const Color(0xff8a5cf6) : const Color(0xff8d948b);
+
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color:
+                  enabled ? const Color(0xffd9ded6) : const Color(0xffe2e6df),
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _SourceAvatar(label: 'LLM', color: accent),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name.isEmpty ? 'LLM API 配置' : name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            _llmApiSummary(model: model, baseUrl: baseUrl),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Color(0xff596158),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    _StatusPill(
+                      label: _llmParseModeLabel(parseMode),
+                      color: enabled
+                          ? const Color(0xff8a5cf6)
+                          : const Color(0xff8d948b),
+                      background: enabled
+                          ? const Color(0xffefe9ff)
+                          : const Color(0xffeef0ed),
+                    ),
+                    _StatusPill(
+                      label: hasKey ? '已配置 Key' : '未配置 Key',
+                      color: hasKey
+                          ? const Color(0xff1f7a6d)
+                          : const Color(0xff8d948b),
+                      background: hasKey
+                          ? const Color(0xffdff3ed)
+                          : const Color(0xffeef0ed),
+                    ),
+                    _StatusPill(
+                      label: '共 ${llmApiConfigs.length} 个配置',
+                      color: const Color(0xff3563d8),
+                      background: const Color(0xffe9eefc),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: OutlinedButton.icon(
+                    onPressed: onConfigure,
+                    icon: const Icon(Icons.settings_rounded, size: 18),
+                    label: const Text('配置 LLM API'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+Future<void> _showLlmApiDialog(
+  BuildContext context, {
+  required bool disabled,
+  required List<LlmApiConfigEntry> entries,
+  required String selectedId,
+  required ValueListenable<int> apiTestRevision,
+  required VoidCallback onAdd,
+  required ValueChanged<int> onRemove,
+  required ValueChanged<int> onSelect,
+  required ValueChanged<int> onTest,
+  required bool Function(int) isTesting,
+  required ApiKeyTestResult? Function(int) testResultForConfig,
+}) {
+  return showDialog<void>(
+    context: context,
+    builder: (ctx) => _LlmApiDialog(
+      entries: entries,
+      selectedId: selectedId,
+      disabled: disabled,
+      apiTestRevision: apiTestRevision,
+      onAdd: onAdd,
+      onRemove: onRemove,
+      onSelect: onSelect,
+      onTest: onTest,
+      isTesting: isTesting,
+      testResultForConfig: testResultForConfig,
+    ),
+  );
+}
+
+class _LlmApiDialog extends StatefulWidget {
+  const _LlmApiDialog({
+    required this.entries,
+    required this.selectedId,
+    required this.disabled,
+    required this.apiTestRevision,
+    required this.onAdd,
+    required this.onRemove,
+    required this.onSelect,
+    required this.onTest,
+    required this.isTesting,
+    required this.testResultForConfig,
+  });
+
+  final List<LlmApiConfigEntry> entries;
+  final String selectedId;
+  final bool disabled;
+  final ValueListenable<int> apiTestRevision;
+  final VoidCallback onAdd;
+  final ValueChanged<int> onRemove;
+  final ValueChanged<int> onSelect;
+  final ValueChanged<int> onTest;
+  final bool Function(int) isTesting;
+  final ApiKeyTestResult? Function(int) testResultForConfig;
+
+  @override
+  State<_LlmApiDialog> createState() => _LlmApiDialogState();
+}
+
+class _LlmApiDialogState extends State<_LlmApiDialog> {
+  int? _expandedIndex;
+
+  void _addConfig() {
+    if (widget.disabled) return;
+    widget.onAdd();
+    setState(() {
+      _expandedIndex = widget.entries.isEmpty ? null : widget.entries.length - 1;
+    });
+  }
+
+  void _removeConfig(int index) {
+    if (widget.disabled) return;
+    widget.onRemove(index);
+    setState(() {
+      if (_expandedIndex == index) {
+        _expandedIndex = null;
+      } else if (_expandedIndex != null && _expandedIndex! > index) {
+        _expandedIndex = _expandedIndex! - 1;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final width = (size.width - 48).clamp(420.0, 760.0).toDouble();
+    final height = (size.height - 64).clamp(480.0, 760.0).toDouble();
+    final expandedIndex = _expandedIndex != null &&
+            _expandedIndex! >= 0 &&
+            _expandedIndex! < widget.entries.length
+        ? _expandedIndex
+        : null;
+
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      elevation: 0,
+      backgroundColor: const Color(0xffeef6f2),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(28, 24, 28, 20),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.psychology_alt_outlined,
+                      size: 24, color: Color(0xff24302a)),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      '配置 LLM API',
+                      style: TextStyle(
+                        fontSize: 28,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xff202823),
+                      ),
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: widget.disabled ? null : _addConfig,
+                    icon: const Icon(Icons.add_rounded, size: 18),
+                    label: const Text('添加'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xff1f7a6d),
+                      side: const BorderSide(color: Color(0xff7d8a83)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '沿用数据源 API 的卡片式配置方式管理多个 LLM API。选择一个配置作为当前启用项；LLM 只用于解析字段，不判断真伪，Key 仅保存在本机设置。',
+                  style: TextStyle(
+                    color: Color(0xff596158),
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: widget.entries.isEmpty
+                    ? _EmptyLlmApiState(onAdd: widget.disabled ? null : _addConfig)
+                    : ListView.separated(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        itemCount: widget.entries.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 12),
+                        itemBuilder: (context, index) => _LlmApiConfigCard(
+                          key: ValueKey(widget.entries[index].id),
+                          entry: widget.entries[index],
+                          index: index,
+                          expanded: expandedIndex == index,
+                          selected: _entrySelected(
+                            widget.entries[index],
+                            widget.selectedId,
+                          ),
+                          disabled: widget.disabled,
+                          apiTestRevision: widget.apiTestRevision,
+                          isTesting: widget.isTesting,
+                          testResultForConfig: widget.testResultForConfig,
+                          onSelect: () {
+                            widget.onSelect(index);
+                            setState(() {});
+                          },
+                          onTest: () => widget.onTest(index),
+                          onToggleExpanded: () {
+                            setState(() {
+                              _expandedIndex =
+                                  expandedIndex == index ? null : index;
+                            });
+                          },
+                          onRemove: () => _removeConfig(index),
+                        ),
+                      ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      '提示：兼容 OpenAI Chat Completions 的服务可填写对应 Base URL、模型名和 Key；测试连接只发送极短请求。',
+                      style: TextStyle(color: Color(0xff596158), fontSize: 12),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text(
+                      '完成',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyLlmApiState extends StatelessWidget {
+  const _EmptyLlmApiState({required this.onAdd});
+
+  final VoidCallback? onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xffd9ded6)),
+      ),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.psychology_alt_outlined,
+                size: 40, color: Color(0xff8d948b)),
+            const SizedBox(height: 10),
+            const Text(
+              '暂无 LLM API 配置',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '点击“添加”创建一个新的 LLM 配置。',
+              style: TextStyle(color: Color(0xff596158)),
+            ),
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              onPressed: onAdd,
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('添加配置'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LlmApiConfigCard extends StatefulWidget {
+  const _LlmApiConfigCard({
+    super.key,
+    required this.entry,
+    required this.index,
+    required this.expanded,
+    required this.selected,
+    required this.disabled,
+    required this.apiTestRevision,
+    required this.isTesting,
+    required this.testResultForConfig,
+    required this.onSelect,
+    required this.onTest,
+    required this.onToggleExpanded,
+    required this.onRemove,
+  });
+
+  final LlmApiConfigEntry entry;
+  final int index;
+  final bool expanded;
+  final bool selected;
+  final bool disabled;
+  final ValueListenable<int> apiTestRevision;
+  final bool Function(int) isTesting;
+  final ApiKeyTestResult? Function(int) testResultForConfig;
+  final VoidCallback onSelect;
+  final VoidCallback onTest;
+  final VoidCallback onToggleExpanded;
+  final VoidCallback onRemove;
+
+  @override
+  State<_LlmApiConfigCard> createState() => _LlmApiConfigCardState();
+}
+
+class _LlmApiConfigCardState extends State<_LlmApiConfigCard> {
+  bool _showApiKey = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        widget.entry.nameController,
+        widget.entry.providerController,
+        widget.entry.modelController,
+        widget.entry.baseUrlController,
+        widget.entry.apiKeyController,
+        widget.apiTestRevision,
+      ]),
+      builder: (context, _) {
+        final displayName = _llmDisplayName(widget.entry);
+        final provider = widget.entry.providerController.text.trim().isEmpty
+            ? 'openai-compatible'
+            : widget.entry.providerController.text.trim();
+        final model = widget.entry.modelController.text.trim();
+        final baseUrl = widget.entry.baseUrlController.text.trim();
+        final hasKey = widget.entry.apiKeyController.text.trim().isNotEmpty;
+        final testing = widget.isTesting(widget.index);
+        final testingAny = widget.isTesting(-1);
+        final testResult = widget.testResultForConfig(widget.index);
+        final accent = widget.selected
+            ? const Color(0xff8a5cf6)
+            : _sourceAccent(displayName, widget.index);
+
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(
+              color: widget.expanded || widget.selected
+                  ? const Color(0xff8a5cf6)
+                  : const Color(0xffd9ded6),
+              width: widget.expanded || widget.selected ? 1.4 : 1,
+            ),
+            boxShadow: [
+              if (widget.expanded || widget.selected)
+                BoxShadow(
+                  color: const Color(0xff8a5cf6).withValues(alpha: 0.08),
+                  blurRadius: 18,
+                  offset: const Offset(0, 8),
+                ),
+            ],
+          ),
+          child: Column(
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _SourceAvatar(label: 'LLM', color: accent),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xff202823),
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        Text(
+                          _llmApiSummary(model: model, baseUrl: baseUrl),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xff596158),
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            _StatusPill(
+                              label: widget.selected ? '当前启用' : '未启用',
+                              color: widget.selected
+                                  ? const Color(0xff8a5cf6)
+                                  : const Color(0xff8d948b),
+                              background: widget.selected
+                                  ? const Color(0xffefe9ff)
+                                  : const Color(0xffeef0ed),
+                            ),
+                            _StatusPill(
+                              label: hasKey ? '已配置 Key' : '未配置 Key',
+                              color: hasKey
+                                  ? const Color(0xff1f7a6d)
+                                  : const Color(0xff8d948b),
+                              background: hasKey
+                                  ? const Color(0xffdff3ed)
+                                  : const Color(0xffeef0ed),
+                            ),
+                            _StatusPill(
+                              label: provider,
+                              color: const Color(0xff3563d8),
+                              background: const Color(0xffe9eefc),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Wrap(
+                    spacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Tooltip(
+                        message: widget.selected ? '当前启用配置' : '启用此配置',
+                        child: Transform.scale(
+                          scale: 0.82,
+                          child: Switch(
+                            value: widget.selected,
+                            onChanged: widget.disabled
+                                ? null
+                                : (value) {
+                                    if (value) widget.onSelect();
+                                  },
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: widget.expanded ? '收起编辑' : '编辑配置',
+                        onPressed: widget.disabled ? null : widget.onToggleExpanded,
+                        icon: Icon(
+                          widget.expanded
+                              ? Icons.keyboard_arrow_up_rounded
+                              : Icons.edit_outlined,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '删除配置',
+                        onPressed: widget.disabled ? null : widget.onRemove,
+                        icon: const Icon(Icons.delete_outline_rounded),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              ClipRect(
+                child: AnimatedSize(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOut,
+                  alignment: Alignment.topCenter,
+                  child: widget.expanded
+                      ? Padding(
+                          padding: const EdgeInsets.only(top: 14),
+                          child: Column(
+                            children: [
+                              const Divider(height: 1),
+                              const SizedBox(height: 14),
+                              TextField(
+                                controller: widget.entry.nameController,
+                                enabled: !widget.disabled,
+                                decoration: const InputDecoration(
+                                  labelText: '配置名称',
+                                  hintText: '例如：DeepSeek / OpenAI / 本地模型',
+                                  prefixIcon: Icon(Icons.badge_outlined),
+                                  isDense: true,
+                                  filled: true,
+                                  fillColor: Color(0xfffbfcfa),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              TextField(
+                                controller: widget.entry.providerController,
+                                enabled: !widget.disabled,
+                                decoration: const InputDecoration(
+                                  labelText: '接口类型 / Provider',
+                                  hintText: 'openai-compatible',
+                                  prefixIcon: Icon(Icons.hub_outlined),
+                                  helperText: '当前支持 OpenAI-compatible Chat Completions。',
+                                  helperMaxLines: 1,
+                                  isDense: true,
+                                  filled: true,
+                                  fillColor: Color(0xfffbfcfa),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              TextField(
+                                controller: widget.entry.modelController,
+                                enabled: !widget.disabled,
+                                decoration: const InputDecoration(
+                                  labelText: 'LLM 模型',
+                                  hintText: 'gpt-4o-mini',
+                                  prefixIcon: Icon(Icons.memory_rounded),
+                                  helperText: '用于引用字段解析的模型名称。',
+                                  helperMaxLines: 1,
+                                  isDense: true,
+                                  filled: true,
+                                  fillColor: Color(0xfffbfcfa),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              TextField(
+                                controller: widget.entry.baseUrlController,
+                                enabled: !widget.disabled,
+                                decoration: const InputDecoration(
+                                  labelText: 'OpenAI-compatible Base URL',
+                                  hintText: 'https://api.openai.com/v1',
+                                  prefixIcon: Icon(Icons.link_rounded),
+                                  helperText: '填写兼容服务的 /v1 地址。',
+                                  helperMaxLines: 1,
+                                  isDense: true,
+                                  filled: true,
+                                  fillColor: Color(0xfffbfcfa),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              TextField(
+                                controller: widget.entry.apiKeyController,
+                                enabled: !widget.disabled,
+                                obscureText: !_showApiKey,
+                                decoration: InputDecoration(
+                                  labelText: 'LLM API Key',
+                                  hintText: '在此粘贴密钥',
+                                  prefixIcon: const Icon(Icons.key_rounded),
+                                  suffixIcon: IconButton(
+                                    tooltip:
+                                        _showApiKey ? '隐藏 API Key' : '显示 API Key',
+                                    onPressed: widget.disabled
+                                        ? null
+                                        : () => setState(
+                                            () => _showApiKey = !_showApiKey),
+                                    icon: Icon(
+                                      _showApiKey
+                                          ? Icons.visibility_off_outlined
+                                          : Icons.visibility_outlined,
+                                    ),
+                                  ),
+                                  helperText: '仅保存在本机设置；不会写入报告或日志。',
+                                  helperMaxLines: 1,
+                                  isDense: true,
+                                  filled: true,
+                                  fillColor: const Color(0xfffbfcfa),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  const Expanded(
+                                    child: Text(
+                                      '连通性测试会向当前 Base URL 发送极短 Chat Completions 请求，不会在日志中输出 Key 明文。',
+                                      style: TextStyle(
+                                        color: Color(0xff596158),
+                                        fontSize: 12,
+                                        height: 1.35,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  OutlinedButton.icon(
+                                    onPressed: widget.disabled || testingAny
+                                        ? null
+                                        : widget.onTest,
+                                    icon: testing
+                                        ? const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                                strokeWidth: 2),
+                                          )
+                                        : const Icon(
+                                            Icons.network_check_rounded,
+                                            size: 18,
+                                          ),
+                                    label: Text(testing ? '测试中' : '测试连接'),
+                                  ),
+                                ],
+                              ),
+                              if (testResult != null) ...[
+                                const SizedBox(height: 10),
+                                DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xfffbfcfa),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(
+                                        color: const Color(0xffd9ded6)),
+                                  ),
+                                  child: ApiKeyTestResultTile(result: testResult),
+                                ),
+                              ],
+                              const SizedBox(height: 12),
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: const Color(0xfffbfcfa),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                      color: const Color(0xffd9ded6)),
+                                ),
+                                child: const Padding(
+                                  padding: EdgeInsets.all(12),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Icon(Icons.info_outline_rounded,
+                                          size: 18, color: Color(0xff596158)),
+                                      SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          '启用“LLM 优先”后，会先调用当前启用的 LLM 解析标题、作者、年份、DOI、URL；如果 LLM 未解析出字段，再回退到本地规则。',
+                                          style: TextStyle(
+                                            color: Color(0xff596158),
+                                            fontSize: 12,
+                                            height: 1.35,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+LlmApiConfigEntry? _selectedLlmEntry(
+  List<LlmApiConfigEntry> entries,
+  String selectedId,
+) {
+  for (final entry in entries) {
+    if (entry.id == selectedId) return entry;
+  }
+  for (final entry in entries) {
+    if (entry.enabled) return entry;
+  }
+  return entries.isEmpty ? null : entries.first;
+}
+
+bool _entrySelected(LlmApiConfigEntry entry, String selectedId) {
+  if (selectedId.isNotEmpty) return entry.id == selectedId;
+  return entry.enabled;
+}
+
+String _llmDisplayName(LlmApiConfigEntry? entry) {
+  if (entry == null) return 'LLM API 配置';
+  final name = entry.nameController.text.trim();
+  if (name.isNotEmpty) return name;
+  final model = entry.modelController.text.trim();
+  if (model.isNotEmpty) return model;
+  return '未命名 LLM';
+}
+
+String _llmParseModeLabel(String mode) {
+  return switch (mode) {
+    'auto' => 'LLM 优先',
+    'always' => '总是 LLM',
+    _ => '规则解析',
+  };
+}
+
+String _llmApiSummary({required String model, required String baseUrl}) {
+  final modelText = model.isEmpty ? '默认模型 gpt-4o-mini' : model;
+  final baseUrlText =
+      baseUrl.isEmpty ? '默认 https://api.openai.com/v1' : baseUrl;
+  return '$modelText · $baseUrlText';
 }
 
 const _restProfileJsonExample = '''{
@@ -1017,17 +2004,34 @@ class _ApiKeySourceCard extends StatelessWidget {
                                 ),
                               ),
                               const SizedBox(height: 10),
-                              TextField(
-                                controller: entry.keyController,
-                                enabled: !disabled,
-                                obscureText: true,
-                                decoration: const InputDecoration(
-                                  labelText: 'API Key',
-                                  hintText: '在此粘贴密钥',
-                                  prefixIcon: Icon(Icons.key_rounded),
-                                  isDense: true,
-                                  filled: true,
-                                  fillColor: Color(0xfffbfcfa),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: entry.showKeyNotifier,
+                                builder: (context, showKey, _) => TextField(
+                                  controller: entry.keyController,
+                                  enabled: !disabled,
+                                  obscureText: !showKey,
+                                  decoration: InputDecoration(
+                                    labelText: 'API Key',
+                                    hintText: '在此粘贴密钥',
+                                    prefixIcon: const Icon(Icons.key_rounded),
+                                    suffixIcon: IconButton(
+                                      tooltip: showKey
+                                          ? '隐藏 API Key'
+                                          : '显示 API Key',
+                                      onPressed: disabled
+                                          ? null
+                                          : () => entry.showKeyNotifier.value =
+                                              !showKey,
+                                      icon: Icon(
+                                        showKey
+                                            ? Icons.visibility_off_rounded
+                                            : Icons.visibility_rounded,
+                                      ),
+                                    ),
+                                    isDense: true,
+                                    filled: true,
+                                    fillColor: const Color(0xfffbfcfa),
+                                  ),
                                 ),
                               ),
                               const SizedBox(height: 10),

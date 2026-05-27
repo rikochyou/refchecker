@@ -73,6 +73,28 @@ TOOLS: list[dict[str, Any]] = [
                 "sources": _text_schema(
                     "Optional comma-separated source priority, e.g. crossref,openalex,semantic-scholar,arxiv,pubmed,dblp,url."
                 ),
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["strict", "parallel"],
+                    "description": "Search mode. strict queries sources in order and stops on high-confidence hits; parallel queries sources concurrently.",
+                    "default": "strict",
+                },
+                "doi_check": {
+                    "type": "string",
+                    "enum": ["auto", "off"],
+                    "description": "DOI exact-check strategy. auto checks DOI metadata before the search chain; off disables it.",
+                    "default": "auto",
+                },
+                "llm_parse_mode": {
+                    "type": "string",
+                    "enum": ["off", "auto", "always"],
+                    "description": "LLM field extraction mode. Any non-off mode is LLM-first and falls back to rule-parsed fields only when the LLM cannot parse a field/row. The LLM only extracts fields and does not judge authenticity.",
+                    "default": "off",
+                },
+                "llm_provider": _text_schema("LLM provider. Currently supports openai-compatible."),
+                "llm_model": _text_schema("LLM model name. Falls back to REFCHECKER_LLM_MODEL."),
+                "llm_base_url": _text_schema("OpenAI-compatible API base URL. Falls back to REFCHECKER_LLM_BASE_URL."),
+                "llm_api_key": _text_schema("Optional LLM API key. Falls back to REFCHECKER_LLM_API_KEY."),
                 "disabled_sources": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -111,6 +133,28 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "email": _text_schema("Optional email used in API User-Agent/mailto fields."),
                 "sources": _text_schema("Optional comma-separated source priority."),
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["strict", "parallel"],
+                    "description": "Search mode. strict queries sources in order and stops on high-confidence hits; parallel queries sources concurrently.",
+                    "default": "strict",
+                },
+                "doi_check": {
+                    "type": "string",
+                    "enum": ["auto", "off"],
+                    "description": "DOI exact-check strategy. auto checks DOI metadata before the search chain; off disables it.",
+                    "default": "auto",
+                },
+                "llm_parse_mode": {
+                    "type": "string",
+                    "enum": ["off", "auto", "always"],
+                    "description": "LLM field extraction mode. Any non-off mode is LLM-first and falls back to rule-parsed fields only when the LLM cannot parse a field/row. The LLM only extracts fields and does not judge authenticity.",
+                    "default": "off",
+                },
+                "llm_provider": _text_schema("LLM provider. Currently supports openai-compatible."),
+                "llm_model": _text_schema("LLM model name. Falls back to REFCHECKER_LLM_MODEL."),
+                "llm_base_url": _text_schema("OpenAI-compatible API base URL. Falls back to REFCHECKER_LLM_BASE_URL."),
+                "llm_api_key": _text_schema("Optional LLM API key. Falls back to REFCHECKER_LLM_API_KEY."),
                 "disabled_sources": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -206,6 +250,19 @@ def _common_verify_kwargs(args: dict[str, Any]) -> dict[str, Any]:
     springer_key = str(args.get("springer_api_key") or os.getenv("REFCHECKER_SPRINGER_API_KEY", "")).strip()
     ieee_key = str(args.get("ieee_api_key") or os.getenv("REFCHECKER_IEEE_API_KEY", "")).strip()
     core_key = str(args.get("core_api_key") or os.getenv("REFCHECKER_CORE_API_KEY", "")).strip()
+    search_mode = str(args.get("search_mode") or "strict").strip().lower()
+    if search_mode not in {"strict", "parallel"}:
+        raise ValueError("search_mode must be 'strict' or 'parallel'.")
+    doi_check = str(args.get("doi_check") or "auto").strip().lower()
+    if doi_check not in {"auto", "off"}:
+        raise ValueError("doi_check must be 'auto' or 'off'.")
+    llm_parse_mode = str(args.get("llm_parse_mode") or os.getenv("REFCHECKER_LLM_PARSE_MODE", "off")).strip().lower()
+    if llm_parse_mode not in {"off", "auto", "always"}:
+        raise ValueError("llm_parse_mode must be 'off', 'auto', or 'always'.")
+    llm_provider = str(args.get("llm_provider") or os.getenv("REFCHECKER_LLM_PROVIDER", "openai-compatible")).strip()
+    llm_model = str(args.get("llm_model") or os.getenv("REFCHECKER_LLM_MODEL", "")).strip()
+    llm_base_url = str(args.get("llm_base_url") or os.getenv("REFCHECKER_LLM_BASE_URL", "")).strip()
+    llm_api_key = str(args.get("llm_api_key") or os.getenv("REFCHECKER_LLM_API_KEY", "")).strip()
 
     return {
         "threshold": _as_float(args, "threshold", 0.85),
@@ -226,6 +283,13 @@ def _common_verify_kwargs(args: dict[str, Any]) -> dict[str, Any]:
         "use_url_verify": enabled("url", True),
         "source_order": build_source_order(selected_sources, custom_source_keys),
         "custom_rest_profiles": custom_rest_profiles,
+        "search_mode": search_mode,
+        "doi_check": doi_check,
+        "llm_parse_mode": llm_parse_mode,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "llm_base_url": llm_base_url,
+        "llm_api_key": llm_api_key,
         "app_version": APP_VERSION,
         "jsonl_progress": False,
         "human_output": False,
@@ -259,6 +323,10 @@ def _format_summary(result: dict[str, Any], *, title: str) -> str:
             f"medium **{summary.get('medium_risk', 0)}**, "
             f"low **{summary.get('low_risk', 0)}**"
         ),
+        f"- Search mode: **{summary.get('search_mode', 'strict')}**",
+        f"- Source order: **{summary.get('source_order', '') or 'default'}**",
+        f"- DOI check: **{summary.get('doi_check_status', 'not_provided')}**",
+        f"- Parser: **{summary.get('parser_summary', '') or 'rules'}** (LLM mode: **{summary.get('llm_parse_mode', 'off')}**)",
     ]
     if summary.get("report_summary"):
         lines.extend(["", "## Report summary", str(summary["report_summary"])])

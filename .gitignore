@@ -26,12 +26,23 @@ run_verification.log
 
 # Local/private working files
 .claude/
+.refchecker_build_state.json
 References.docx
+settings.json
+refchecker_settings.json
+custom_rest_profiles.json
+custom_rest_profiles*.json
+*.local.json
+.env
+.env.*
+!.env.example
 
 # BibTeX files (user data)
 *.bib
 !examples/
 !examples/*.bib
+!examples/*.json
+examples/refchecker_web_output/
 
 # Miscellaneous
 *.class

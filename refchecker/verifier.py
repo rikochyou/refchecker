@@ -120,8 +120,21 @@ def _has_candidate_payload(result: dict | None) -> bool:
     )
 
 
+def _is_web_evidence_result(result: dict | None) -> bool:
+    if not result:
+        return False
+    if str(result.get("web_evidence") or "").strip().lower() in {"yes", "true", "1", "web"}:
+        return True
+    if str(result.get("evidence_kind") or "").strip().lower() in {"web", "web_evidence", "web_search"}:
+        return True
+    source = str(result.get("source") or "")
+    return "Web Evidence" in source or source.lower().startswith("brave ")
+
+
 def _candidate_reliability(result: dict) -> float:
     source = result.get("source", "")
+    if _is_web_evidence_result(result):
+        return 0.58
     if source in _SOURCE_RELIABILITY:
         return _SOURCE_RELIABILITY[source]
     if source.startswith("URL("):
@@ -294,6 +307,359 @@ def enrich_result(result: dict, *, bib_author: str, bib_year: str, bib_doi: str)
     return result
 
 
+
+SEARCH_MODE_STRICT = "strict"
+SEARCH_MODE_PARALLEL = "parallel"
+DOI_CHECK_AUTO = "auto"
+DOI_CHECK_OFF = "off"
+DOI_STATUS_MATCHED = "matched"
+DOI_STATUS_MISMATCH = "mismatch"
+DOI_STATUS_UNRESOLVED = "unresolved"
+DOI_STATUS_NO_METADATA = "no_metadata"
+DOI_STATUS_NOT_PROVIDED = "not_provided"
+
+
+def normalize_search_mode(value: str | None) -> str:
+    value = (value or SEARCH_MODE_STRICT).strip().lower()
+    if value not in {SEARCH_MODE_STRICT, SEARCH_MODE_PARALLEL}:
+        return SEARCH_MODE_STRICT
+    return value
+
+
+def normalize_doi_check(value: str | None) -> str:
+    value = (value or DOI_CHECK_AUTO).strip().lower()
+    if value not in {DOI_CHECK_AUTO, DOI_CHECK_OFF}:
+        return DOI_CHECK_AUTO
+    return value
+
+
+def _doi_status_label(status: str) -> str:
+    return {
+        DOI_STATUS_MATCHED: "matched",
+        DOI_STATUS_MISMATCH: "mismatch",
+        DOI_STATUS_UNRESOLVED: "unresolved",
+        DOI_STATUS_NO_METADATA: "no metadata",
+        DOI_STATUS_NOT_PROVIDED: "not provided",
+    }.get(status or DOI_STATUS_NOT_PROVIDED, "not provided")
+
+
+def _is_meaningful_input_title(title: str, doi: str = "") -> bool:
+    clean_title = (title or "").strip()
+    if len(clean_title) < 12:
+        return False
+    if clean_title.lower().startswith(("http://", "https://", "doi:", "doi.org/")):
+        return False
+    looks_like_doi = bool(re.fullmatch(r"10\.\d{4,9}/\S+", clean_title, flags=re.I))
+    cleaned = clean_doi(clean_title) if looks_like_doi else ""
+    if looks_like_doi and cleaned and (not doi or cleaned == clean_doi(doi)):
+        # DOI-only / URL-only pasted input should not be treated as a title mismatch.
+        return False
+    return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", clean_title))
+
+
+def run_doi_exact_check(
+    *,
+    title: str,
+    author: str,
+    year: str,
+    doi: str,
+    threshold: float,
+    email: str,
+    doi_check: str = DOI_CHECK_AUTO,
+) -> dict:
+    """Independent DOI exact-check stage.
+
+    This stage is intentionally separate from the user-configured search chain.
+    It currently uses CrossRef DOI metadata as the metadata resolver, but exposes
+    the result as "DOI exact check" rather than as a CrossRef source hit.
+    """
+    strategy = normalize_doi_check(doi_check)
+    cleaned = clean_doi(doi)
+    base = {
+        "doi_check_status": DOI_STATUS_NOT_PROVIDED,
+        "doi_check_strategy": strategy,
+        "doi_normalized": cleaned,
+        "doi_resolved_url": "",
+        "doi_target_title": "",
+        "doi_target_authors": "",
+        "doi_target_year": "",
+        "doi_target_doi": "",
+        "doi_title_similarity": "",
+        "doi_check_message": "No DOI provided; DOI exact check skipped.",
+        "doi_metadata_source": "DOI exact check",
+        "doi_metadata": None,
+    }
+    if strategy == DOI_CHECK_OFF:
+        base["doi_check_message"] = "DOI exact check is disabled."
+        return base
+    if not cleaned:
+        return base
+
+    base["doi_check_message"] = "Checking DOI metadata."
+    try:
+        metadata = _sources.search_crossref_by_doi(cleaned, title, email)
+    except Exception as exc:  # Defensive: source helpers should already catch.
+        metadata = {"found": False, "reason": f"DOI metadata lookup failed: {type(exc).__name__}: {exc}"}
+
+    if not _has_candidate_payload(metadata) or not metadata.get("matched_title"):
+        reason = metadata.get("reason", "DOI metadata lookup returned no result") if isinstance(metadata, dict) else "DOI metadata lookup returned no result"
+        lower_reason = str(reason).lower()
+        status = DOI_STATUS_UNRESOLVED if any(
+            token in lower_reason
+            for token in ["failed", "failure", "timeout", "timed out", "connection", "network", "http", "request"]
+        ) else DOI_STATUS_NO_METADATA
+        base.update({
+            "doi_check_status": status,
+            "doi_resolved_url": f"https://doi.org/{cleaned}",
+            "doi_target_doi": cleaned,
+            "doi_check_message": f"DOI exact check {_doi_status_label(status)}: {reason}",
+        })
+        return base
+
+    metadata = dict(metadata)
+    target_title = metadata.get("matched_title", "")
+    target_year = str(metadata.get("year", "") or "")
+    target_doi = clean_doi(metadata.get("doi", "")) or cleaned
+    target_authors = metadata.get("authors", "")
+    resolved_url = metadata.get("url", "") or (f"https://doi.org/{target_doi}" if target_doi else f"https://doi.org/{cleaned}")
+
+    mismatches: list[str] = []
+    sim = ""
+    if _is_meaningful_input_title(title, cleaned) and target_title:
+        sim_value = title_similarity(title, target_title)
+        sim = f"{sim_value:.4f}"
+        if sim_value < threshold:
+            mismatches.append(f"title mismatch (similarity {sim_value:.0%})")
+
+    if author and metadata.get("author_list"):
+        author_cmp = compare_author_lists(author, metadata.get("author_list") or [])
+        if author_cmp.get("status") == "mismatch":
+            mismatches.append(f"author mismatch: {author_cmp.get('reason', '')}")
+
+    if year:
+        year_cmp = compare_year(year, target_year)
+        if year_cmp.get("status") == "mismatch":
+            mismatches.append(f"year mismatch: {year_cmp.get('reason', '')}")
+
+    status = DOI_STATUS_MISMATCH if mismatches else DOI_STATUS_MATCHED
+    base.update({
+        "doi_check_status": status,
+        "doi_resolved_url": resolved_url,
+        "doi_target_title": target_title,
+        "doi_target_authors": target_authors,
+        "doi_target_year": target_year,
+        "doi_target_doi": target_doi,
+        "doi_title_similarity": sim,
+        "doi_check_message": (
+            f"DOI exact check mismatch: {'; '.join(mismatches)}."
+            if mismatches else "DOI exact check passed: DOI metadata has no explicit title/author/year conflict."
+        ),
+        "doi_metadata": metadata,
+    })
+    return base
+
+
+def _source_order_text(enabled_sources: list[str], custom_rest_profiles: dict[str, dict] | None = None) -> str:
+    if not enabled_sources:
+        return "No database source enabled"
+    return " -> ".join(_source_label(name, custom_rest_profiles) for name in enabled_sources)
+
+
+def _format_actual_query_trace(doi_info: dict | None, source_trace: list[dict]) -> str:
+    parts: list[str] = []
+    if doi_info and doi_info.get("doi_check_status") != DOI_STATUS_NOT_PROVIDED:
+        parts.append(
+            "DOI exact check: "
+            + _doi_status_label(str(doi_info.get("doi_check_status") or ""))
+            + (f" - {doi_info.get('doi_target_title')}" if doi_info.get("doi_target_title") else "")
+        )
+    source_text = _format_source_trace(source_trace)
+    if source_text:
+        parts.append(source_text)
+    return "; ".join(parts)
+
+
+def _attach_flow_fields(
+    result: dict,
+    *,
+    search_mode: str,
+    doi_info: dict | None,
+    enabled_sources: list[str],
+    custom_profile_map: dict[str, dict] | None,
+    source_trace: list[dict],
+) -> dict:
+    source_order = _source_order_text(enabled_sources, custom_profile_map)
+    actual_trace = _format_actual_query_trace(doi_info, source_trace)
+    result["search_mode"] = search_mode
+    result["source_order"] = source_order
+    result["source_order_keys"] = ",".join(enabled_sources)
+    result["query_trace"] = actual_trace
+    result["actual_query_trace"] = actual_trace
+    result["adopted_source"] = result.get("source", "")
+    # Keep the legacy field useful for the desktop detail dialog.
+    result["source_trace"] = actual_trace or result.get("source_trace", "")
+
+    info = doi_info or {}
+    for key in [
+        "doi_check_status",
+        "doi_check_strategy",
+        "doi_normalized",
+        "doi_resolved_url",
+        "doi_target_title",
+        "doi_target_authors",
+        "doi_target_year",
+        "doi_target_doi",
+        "doi_title_similarity",
+        "doi_check_message",
+        "doi_metadata_source",
+    ]:
+        result[key] = info.get(key, "")
+    return result
+
+
+def _is_high_confidence_candidate(candidate: dict, *, threshold: float) -> bool:
+    if not candidate.get("found"):
+        return False
+    if _is_web_evidence_result(candidate):
+        return False
+    if candidate.get("source") == "URL(Web)":
+        return False
+    if (candidate.get("similarity", 0) or 0) < threshold:
+        return False
+    if candidate.get("doi_check") == "mismatch":
+        return False
+    if candidate.get("author_check") == "mismatch":
+        return False
+    if candidate.get("year_check") == "mismatch":
+        return False
+    return True
+
+
+def _candidate_sort_key(item: dict) -> tuple[float, int, float]:
+    return (
+        float(item.get("arbitration_score", 0) or 0),
+        -int(item.get("_source_order", 999)),
+        _candidate_reliability(item),
+    )
+
+
+def _candidate_from_doi_info(doi_info: dict | None, *, title: str, author: str, year: str, threshold: float) -> dict | None:
+    if not doi_info or doi_info.get("doi_check_status") not in {DOI_STATUS_MATCHED, DOI_STATUS_MISMATCH}:
+        return None
+    metadata = doi_info.get("doi_metadata")
+    if not isinstance(metadata, dict):
+        return None
+    candidate = dict(metadata)
+    candidate["source"] = "DOI exact check"
+    candidate["_source_key"] = "doi-exact"
+    candidate["_source_order"] = 998
+    if doi_info.get("doi_check_status") == DOI_STATUS_MATCHED:
+        candidate["found"] = True
+        candidate["status"] = "found"
+        candidate.setdefault("reason", doi_info.get("doi_check_message", ""))
+        if not _is_meaningful_input_title(title, doi_info.get("doi_normalized", "")):
+            candidate["similarity"] = 1.0
+    else:
+        candidate["found"] = False
+        candidate["status"] = "not_found"
+        candidate["reason"] = doi_info.get("doi_check_message", "Input DOI points to metadata that does not match this reference.")
+    enriched = enrich_result(candidate, bib_author=author, bib_year=year, bib_doi=doi_info.get("doi_normalized", ""))
+    enriched["arbitration_score"] = _arbitration_score(enriched, threshold=threshold)
+    if doi_info.get("doi_check_status") == DOI_STATUS_MATCHED:
+        enriched["arbitration_score"] += 18
+    else:
+        enriched["arbitration_score"] -= 80
+    return enriched
+
+
+def _no_source_result(source_label: str, *, author: str, year: str, doi: str) -> dict:
+    result: dict = {"found": False, "similarity": 0.0, "reason": "No enabled source returned a reliable match", "source": source_label}
+    return enrich_result(result, bib_author=author, bib_year=year, bib_doi=doi)
+
+
+def _finalize_verified_result(
+    *,
+    selected: dict | None,
+    candidates: list[dict],
+    alternatives: list[dict],
+    source_trace: list[dict],
+    enabled_sources: list[str],
+    custom_profile_map: dict[str, dict],
+    threshold: float,
+    title: str,
+    author: str,
+    year: str,
+    doi: str,
+    search_mode: str,
+    doi_info: dict | None,
+    use_url_verify: bool,
+    url: str,
+    db_best_is_found: bool,
+    stopped_early: bool = False,
+) -> dict:
+    source_label = _source_order_text(enabled_sources, custom_profile_map)
+    if selected is None:
+        selected = _no_source_result(source_label, author=author, year=year, doi=doi)
+
+    best = dict(selected)
+    if best.get("source") == "DOI exact check" and (doi_info or {}).get("doi_check_status") == DOI_STATUS_MISMATCH:
+        found = False
+    else:
+        found = bool(
+            best.get("doi_exact_query")
+            or (best.get("source", "").startswith("URL(") and best.get("found"))
+            or best.get("similarity", 0) >= threshold
+            or (best.get("source") == "DOI exact check" and best.get("found"))
+        )
+    best["found"] = found
+    best["status"] = "found" if found else "not_found"
+
+    best["candidate_count"] = len(candidates)
+    best["alternative_candidates"] = "; ".join(
+        _format_candidate_line(item) for item in alternatives[:5]
+    )
+    if search_mode == SEARCH_MODE_STRICT:
+        if stopped_early:
+            reason = "Strict mode: queried sources one by one and stopped after a high-confidence hit."
+        else:
+            reason = "Strict mode: queried sources one by one; no earlier source met the high-confidence stop rule."
+    else:
+        reason = "Parallel mode: queried multiple sources concurrently; order is used only as a tie-breaker."
+    best["arbitration_reason"] = (
+        f"{reason} Search chain: {source_label}; "
+        f"{len(candidates)} search-chain candidate(s). Adopted {best.get('source', 'Unknown')}: "
+        f"{_format_candidate_line(best)}."
+    )
+    if search_mode == SEARCH_MODE_PARALLEL:
+        best["arbitration_reason"] += " Parallel arbitration is not strict ordered querying."
+    if use_url_verify and url and not db_best_is_found:
+        best["arbitration_reason"] += " URL verification was added because database sources did not produce a reliable hit."
+
+    if not found:
+        best["reason"] = best.get("reason") or (
+            f"{source_label} did not return a reliable match above threshold "
+            f"(best title similarity {best.get('similarity', 0):.0%})"
+        )
+    elif not best.get("reason"):
+        best["reason"] = best["arbitration_reason"]
+
+    conflict = _candidate_conflict(best, alternatives, threshold=threshold)
+    best["candidate_conflict"] = "Yes" if conflict else "No"
+    if conflict:
+        existing = best.get("review_reasons", "")
+        best["needs_review"] = "Yes"
+        best["review_reasons"] = "; ".join([v for v in [existing, conflict] if v])
+
+    return _attach_flow_fields(
+        best,
+        search_mode=search_mode,
+        doi_info=doi_info,
+        enabled_sources=enabled_sources,
+        custom_profile_map=custom_profile_map,
+        source_trace=source_trace,
+    )
+
+
 def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
                  email: str, use_openalex: bool, use_dblp: bool,
                  use_semantic_scholar: bool = True, use_arxiv: bool = True,
@@ -303,21 +669,14 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
                  ieee_api_key: str = "", core_api_key: str = "", url: str = "",
                  use_url_verify: bool = True,
                  source_order: list[str] | None = None,
-                 custom_rest_profiles: list[dict] | None = None) -> dict:
-    """Verify one entry with cross-source arbitration and bounded concurrency.
-
-    Source order now means "query order / tie-breaker", not "first match wins".
-    RefChecker collects candidates from enabled database sources, compares their
-    title/DOI/author/year evidence, and only uses source priority when evidence is
-    close. This prevents a low-quality first source from hiding a later
-    high-confidence CrossRef/OpenAlex/PubMed match.
-    """
-    candidates: list[dict] = []
-    source_trace: list[dict] = []
+                 custom_rest_profiles: list[dict] | None = None,
+                 search_mode: str = SEARCH_MODE_STRICT,
+                 doi_check: str = DOI_CHECK_AUTO) -> dict:
+    """Verify one entry with DOI pre-check plus strict/parallel search-chain modes."""
+    search_mode = normalize_search_mode(search_mode)
+    doi_check = normalize_doi_check(doi_check)
     custom_profile_map = _custom_rest.profile_map(custom_rest_profiles)
-
     order = build_source_order(source_order, list(custom_profile_map.keys()))
-
     enabled_kwargs = dict(
         use_openalex=use_openalex, use_dblp=use_dblp,
         use_semantic_scholar=use_semantic_scholar, use_arxiv=use_arxiv,
@@ -327,34 +686,25 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
         core_api_key=core_api_key,
         custom_rest_profiles=custom_profile_map,
     )
-
-    result: dict = {"found": False, "similarity": 0.0, "reason": "未启用可用数据源"}
-
     enabled_sources = [
         source_name for source_name in order
         if _source_enabled(source_name, **enabled_kwargs)
     ]
+    query_sources = enabled_sources if _is_meaningful_input_title(title, doi) else []
     order_index = {source_name: index for index, source_name in enumerate(order)}
 
-    def run_source(source_name: str) -> list[dict]:
-        """Run one source and return zero or more raw candidate dicts."""
-        rows: list[dict] = []
-        # CrossRef DOI 精确查询不再抢在 source_order 之前执行；它只是 CrossRef
-        # 源内部的增强能力。为提速和减压，若 DOI 精确查询拿到可用记录，则不再
-        # 对同一来源重复发起标题搜索。
-        if source_name == "crossref" and doi:
-            doi_result = _sources.search_crossref_by_doi(doi, title, email)
-            if _has_candidate_payload(doi_result):
-                doi_result = dict(doi_result)
-                doi_result.setdefault("source", "CrossRef(DOI)")
-                doi_result["found"] = bool(
-                    doi_result.get("doi_exact_query")
-                    or doi_result.get("similarity", 0) >= threshold * 0.6
-                )
-                rows.append(doi_result)
-                if doi_result.get("doi_exact_query") and doi_result.get("matched_title"):
-                    return rows
+    doi_info = run_doi_exact_check(
+        title=title,
+        author=author,
+        year=year,
+        doi=doi,
+        threshold=threshold,
+        email=email,
+        doi_check=doi_check,
+    )
 
+    def run_source(source_name: str) -> list[dict]:
+        """Run one search-chain source. DOI exact lookup is not done here."""
         r = _search_source(
             source_name, title, author, year, threshold, email,
             springer_api_key=springer_api_key,
@@ -362,18 +712,81 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
             core_api_key=core_api_key,
             custom_rest_profiles=custom_profile_map,
         )
-        if _has_candidate_payload(r):
-            rows.append(dict(r))
-        return rows
+        return [dict(r)] if _has_candidate_payload(r) else []
 
-    # 1) 数据库源并发核验。只在单条文献内部开小并发，避免批量条目同时打爆 API。
+    def enrich_rows(source_name: str, rows: list[dict]) -> list[dict]:
+        enriched_rows: list[dict] = []
+        label = _source_label(source_name, custom_profile_map)
+        for raw in rows:
+            candidate = dict(raw)
+            candidate.setdefault("source", label)
+            candidate["_source_key"] = source_name
+            candidate["_source_order"] = order_index.get(source_name, 999)
+            enriched = enrich_result(candidate, bib_author=author, bib_year=year, bib_doi=doi)
+            enriched["arbitration_score"] = _arbitration_score(enriched, threshold=threshold)
+            enriched_rows.append(enriched)
+        return enriched_rows
+
+    if search_mode == SEARCH_MODE_PARALLEL:
+        return _verify_entry_parallel_mode(
+            title=title,
+            author=author,
+            year=year,
+            doi=doi,
+            threshold=threshold,
+            email=email,
+            url=url,
+            use_url_verify=use_url_verify,
+            enabled_sources=query_sources,
+            order_index=order_index,
+            custom_profile_map=custom_profile_map,
+            run_source=run_source,
+            enrich_rows=enrich_rows,
+            doi_info=doi_info,
+        )
+
+    return _verify_entry_strict_mode(
+        title=title,
+        author=author,
+        year=year,
+        doi=doi,
+        threshold=threshold,
+        email=email,
+        url=url,
+        use_url_verify=use_url_verify,
+        enabled_sources=query_sources,
+        order_index=order_index,
+        custom_profile_map=custom_profile_map,
+        run_source=run_source,
+        enrich_rows=enrich_rows,
+        doi_info=doi_info,
+    )
+
+
+def _verify_entry_parallel_mode(
+    *,
+    title: str,
+    author: str,
+    year: str,
+    doi: str,
+    threshold: float,
+    email: str,
+    url: str,
+    use_url_verify: bool,
+    enabled_sources: list[str],
+    order_index: dict[str, int],
+    custom_profile_map: dict[str, dict],
+    run_source,
+    enrich_rows,
+    doi_info: dict,
+) -> dict:
+    candidates: list[dict] = []
+    source_trace: list[dict] = []
+
     if enabled_sources:
         max_workers = min(4, len(enabled_sources))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(run_source, source_name): source_name
-                for source_name in enabled_sources
-            }
+            futures = {executor.submit(run_source, source_name): source_name for source_name in enabled_sources}
             for future in as_completed(futures):
                 source_name = futures[future]
                 label = _source_label(source_name, custom_profile_map)
@@ -387,7 +800,6 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
                         "reason": f"{type(exc).__name__}: {exc}",
                     })
                     continue
-
                 if not rows:
                     source_trace.append({
                         "source": label,
@@ -395,7 +807,6 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
                         "order": order_index.get(source_name, 999),
                     })
                     continue
-
                 best_for_source = max(rows, key=lambda item: item.get("similarity", 0) or 0)
                 source_trace.append({
                     "source": best_for_source.get("source") or label,
@@ -404,35 +815,10 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
                     "similarity": best_for_source.get("similarity", 0) or 0,
                     "reason": best_for_source.get("reason", ""),
                 })
-                for raw in rows:
-                    candidate = dict(raw)
-                    candidate.setdefault("source", label)
-                    candidate["_source_key"] = source_name
-                    candidate["_source_order"] = order_index.get(source_name, 999)
-                    enriched = enrich_result(
-                        candidate, bib_author=author, bib_year=year, bib_doi=doi
-                    )
-                    enriched["arbitration_score"] = _arbitration_score(
-                        enriched, threshold=threshold
-                    )
-                    candidates.append(enriched)
+                candidates.extend(enrich_rows(source_name, rows))
 
-    # 2) 先在数据库候选内仲裁；只有数据库没有可靠命中时才访问 URL，避免无谓网页请求。
-    def candidate_sort_key(item: dict) -> tuple[float, int, float]:
-        return (
-            float(item.get("arbitration_score", 0) or 0),
-            -int(item.get("_source_order", 999)),
-            _candidate_reliability(item),
-        )
-
-    db_best = max(candidates, key=candidate_sort_key) if candidates else None
-    db_best_is_found = bool(
-        db_best
-        and (
-            db_best.get("doi_exact_query")
-            or db_best.get("similarity", 0) >= threshold
-        )
-    )
+    db_best = max(candidates, key=_candidate_sort_key) if candidates else None
+    db_best_is_found = bool(db_best and (db_best.get("similarity", 0) >= threshold))
 
     if use_url_verify and url and not db_best_is_found:
         web = _url_verify.verify_url_resource(url, title, author, year, email)
@@ -440,71 +826,178 @@ def verify_entry(title: str, author: str, year: str, doi: str, threshold: float,
             web = dict(web)
             web.setdefault("source", "URL(Web)")
             web["_source_key"] = "url"
-            web["_source_order"] = order_index.get("url", len(order) + 1)
+            web["_source_order"] = len(enabled_sources) + 1
             enriched = enrich_result(web, bib_author=author, bib_year=year, bib_doi=doi)
             enriched["arbitration_score"] = _arbitration_score(enriched, threshold=threshold)
             candidates.append(enriched)
             source_trace.append({
                 "source": enriched.get("source", "URL(Web)"),
                 "status": "found" if enriched.get("found") else "candidate",
-                "order": order_index.get("url", len(order) + 1),
+                "order": len(enabled_sources) + 1,
                 "similarity": enriched.get("similarity", 0) or 0,
                 "reason": enriched.get("reason", ""),
             })
 
-    source_names = [_source_label(n, custom_profile_map) for n in enabled_sources]
-    source_label = " / ".join(source_names) if source_names else "未启用数据库源"
+    doi_candidate = _candidate_from_doi_info(doi_info, title=title, author=author, year=year, threshold=threshold)
+    all_candidates = list(candidates)
+    if doi_candidate and doi_info.get("doi_check_status") == DOI_STATUS_MATCHED:
+        all_candidates.append(doi_candidate)
 
-    # 3) 全局仲裁。质量差异明显时选证据更强的来源；质量接近时按用户排序打破平局。
-    if candidates:
-        sorted_candidates = sorted(candidates, key=candidate_sort_key, reverse=True)
+    if all_candidates:
+        sorted_candidates = sorted(all_candidates, key=_candidate_sort_key, reverse=True)
         best = dict(sorted_candidates[0])
         alternatives = [dict(item) for item in sorted_candidates[1:]]
+    elif doi_candidate:
+        best = dict(doi_candidate)
+        alternatives = []
     else:
-        best = result
+        best = None
         alternatives = []
 
-    if not candidates:
-        best.setdefault("source", source_label)
-        best = enrich_result(best, bib_author=author, bib_year=year, bib_doi=doi)
-
-    found = bool(
-        best.get("doi_exact_query")
-        or (best.get("source", "").startswith("URL(") and best.get("found"))
-        or best.get("similarity", 0) >= threshold
-    )
-    best["found"] = found
-    best["status"] = "found" if found else "not_found"
-
-    best["candidate_count"] = len(candidates)
-    best["source_trace"] = _format_source_trace(source_trace)
-    best["alternative_candidates"] = "；".join(
-        _format_candidate_line(item) for item in alternatives[:5]
-    )
-    best["arbitration_reason"] = (
-        f"已并发核验 {len(enabled_sources)} 个数据库源"
-        f"{'，并在数据库未可靠命中时核验 URL' if use_url_verify and url and not db_best_is_found else ''}；"
-        f"共得到 {len(candidates)} 个候选。选择 {best.get('source', 'Unknown')}："
-        f"{_format_candidate_line(best)}。排序仅在候选证据质量接近时作为平局项。"
+    return _finalize_verified_result(
+        selected=best,
+        candidates=candidates,
+        alternatives=alternatives,
+        source_trace=source_trace,
+        enabled_sources=enabled_sources,
+        custom_profile_map=custom_profile_map,
+        threshold=threshold,
+        title=title,
+        author=author,
+        year=year,
+        doi=doi,
+        search_mode=SEARCH_MODE_PARALLEL,
+        doi_info=doi_info,
+        use_url_verify=use_url_verify,
+        url=url,
+        db_best_is_found=db_best_is_found,
     )
 
-    if not found:
-        best["reason"] = (
-            f"{source_label} 未返回达到阈值的可靠匹配"
-            f"(最佳标题相似度 {best.get('similarity', 0):.0%})"
+
+def _verify_entry_strict_mode(
+    *,
+    title: str,
+    author: str,
+    year: str,
+    doi: str,
+    threshold: float,
+    email: str,
+    url: str,
+    use_url_verify: bool,
+    enabled_sources: list[str],
+    order_index: dict[str, int],
+    custom_profile_map: dict[str, dict],
+    run_source,
+    enrich_rows,
+    doi_info: dict,
+) -> dict:
+    candidates: list[dict] = []
+    source_trace: list[dict] = []
+    selected: dict | None = None
+    stopped_early = False
+
+    for source_name in enabled_sources:
+        label = _source_label(source_name, custom_profile_map)
+        try:
+            rows = run_source(source_name)
+        except Exception as exc:
+            source_trace.append({
+                "source": label,
+                "status": "error",
+                "order": order_index.get(source_name, 999),
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
+            continue
+        if not rows:
+            source_trace.append({
+                "source": label,
+                "status": "no_candidate",
+                "order": order_index.get(source_name, 999),
+            })
+            continue
+
+        enriched_rows = enrich_rows(source_name, rows)
+        candidates.extend(enriched_rows)
+        best_for_source = max(enriched_rows, key=_candidate_sort_key)
+        source_trace.append({
+            "source": best_for_source.get("source") or label,
+            "status": "found" if best_for_source.get("found") else "candidate",
+            "order": order_index.get(source_name, 999),
+            "similarity": best_for_source.get("similarity", 0) or 0,
+            "reason": best_for_source.get("reason", ""),
+        })
+        if (
+            doi_info.get("doi_check_status") != DOI_STATUS_MISMATCH
+            and _is_high_confidence_candidate(best_for_source, threshold=threshold)
+        ):
+            selected = best_for_source
+            stopped_early = True
+            break
+
+    db_best = max(candidates, key=_candidate_sort_key) if candidates else None
+    db_best_is_found = bool(db_best and (db_best.get("similarity", 0) >= threshold))
+
+    if selected is None and use_url_verify and url and not db_best_is_found:
+        web = _url_verify.verify_url_resource(url, title, author, year, email)
+        if _has_candidate_payload(web):
+            web = dict(web)
+            web.setdefault("source", "URL(Web)")
+            web["_source_key"] = "url"
+            web["_source_order"] = len(enabled_sources) + 1
+            enriched = enrich_result(web, bib_author=author, bib_year=year, bib_doi=doi)
+            enriched["arbitration_score"] = _arbitration_score(enriched, threshold=threshold)
+            candidates.append(enriched)
+            source_trace.append({
+                "source": enriched.get("source", "URL(Web)"),
+                "status": "found" if enriched.get("found") else "candidate",
+                "order": len(enabled_sources) + 1,
+                "similarity": enriched.get("similarity", 0) or 0,
+                "reason": enriched.get("reason", ""),
+            })
+            if (
+                doi_info.get("doi_check_status") != DOI_STATUS_MISMATCH
+                and _is_high_confidence_candidate(enriched, threshold=threshold)
+            ):
+                selected = enriched
+
+    doi_candidate = _candidate_from_doi_info(doi_info, title=title, author=author, year=year, threshold=threshold)
+    all_candidates = list(candidates)
+    if doi_candidate and doi_info.get("doi_check_status") == DOI_STATUS_MATCHED:
+        all_candidates.append(doi_candidate)
+
+    if selected is None:
+        if all_candidates:
+            selected = max(all_candidates, key=_candidate_sort_key)
+        elif doi_candidate:
+            selected = doi_candidate
+
+    alternatives = []
+    if selected is not None:
+        alternatives = sorted(
+            [dict(item) for item in all_candidates if item is not selected and item.get("source") != selected.get("source")],
+            key=_candidate_sort_key,
+            reverse=True,
         )
-    elif not best.get("reason"):
-        best["reason"] = best["arbitration_reason"]
 
-    conflict = _candidate_conflict(best, alternatives, threshold=threshold)
-    best["candidate_conflict"] = "Yes" if conflict else "No"
-    if conflict:
-        existing = best.get("review_reasons", "")
-        best["needs_review"] = "Yes"
-        best["review_reasons"] = "；".join([v for v in [existing, conflict] if v])
-
-    return best
-
+    return _finalize_verified_result(
+        selected=selected,
+        candidates=candidates,
+        alternatives=alternatives,
+        source_trace=source_trace,
+        enabled_sources=enabled_sources,
+        custom_profile_map=custom_profile_map,
+        threshold=threshold,
+        title=title,
+        author=author,
+        year=year,
+        doi=doi,
+        search_mode=SEARCH_MODE_STRICT,
+        doi_info=doi_info,
+        use_url_verify=use_url_verify,
+        url=url,
+        db_best_is_found=db_best_is_found,
+        stopped_early=stopped_early,
+    )
 
 def status_icon(status: str) -> str:
     return {
@@ -573,6 +1066,14 @@ def build_evidence_basis(result: dict) -> str:
     """Summarize the database/source evidence used by repair suggestions."""
     source = _evidence_source_label(result)
     evidence: list[str] = []
+    if _is_web_evidence_result(result):
+        evidence.append(
+            f"{source} 仅提供网页搜索证据，不提供 CrossRef/OpenAlex 类型的结构化文献元数据"
+        )
+        if result.get("web_evidence_note"):
+            evidence.append(_as_text(result.get("web_evidence_note")))
+        if result.get("web_evidence_links"):
+            evidence.append(f"可点击网页候选：{result.get('web_evidence_links')}")
     if result.get("status") == "not_found" or not result.get("found", True):
         evidence.append(
             f"{source} 未返回达到阈值的可靠匹配"
@@ -602,6 +1103,14 @@ def build_evidence_basis(result: dict) -> str:
         evidence.append(f"年份核验：{result.get('year_reason')}")
     if result.get("doi_reason"):
         evidence.append(f"DOI 核验：{result.get('doi_reason')}")
+    if result.get("doi_check_status") and result.get("doi_check_status") != DOI_STATUS_NOT_PROVIDED:
+        evidence.append(f"DOI 精确核验：{result.get('doi_check_status')}；{result.get('doi_check_message', '')}")
+        if result.get("doi_target_title"):
+            evidence.append(f"DOI 指向标题：{truncate(result.get('doi_target_title', ''), 120)}")
+        if result.get("doi_resolved_url"):
+            evidence.append(f"DOI 解析地址：{result.get('doi_resolved_url')}")
+    if result.get("actual_query_trace"):
+        evidence.append(f"实际查询路径：{result.get('actual_query_trace')}")
     if result.get("arbitration_reason"):
         evidence.append(f"多来源仲裁：{result.get('arbitration_reason')}")
     if not evidence and result.get("reason"):
@@ -624,7 +1133,13 @@ def risk_explanation(result: dict) -> str:
         if result.get("matched_title"):
             reasons.append(f"最接近结果标题相似度为 {similarity:.0%}")
     else:
-        reasons.append(f"数据库核验来源为 {source}")
+        if _is_web_evidence_result(result):
+            reasons.append(
+                f"{source} 发现了网页搜索候选，但该来源不返回结构化作者、年份、DOI 等文献元数据"
+            )
+            reasons.append("该结果只能作为可打开核对的网页证据，不能单独证明参考文献真实或元数据正确")
+        else:
+            reasons.append(f"数据库核验来源为 {source}")
         if source != "URL(Web)" and similarity:
             reasons.append(f"标题相似度 {similarity:.0%}")
 
@@ -634,6 +1149,15 @@ def risk_explanation(result: dict) -> str:
         )
     elif result.get("doi_check") == "missing_in_bib" and result.get("matched_doi"):
         reasons.append(f"输入记录缺少 DOI，数据源提供候选 DOI {result.get('matched_doi')}")
+
+    doi_exact_status = result.get("doi_check_status")
+    if doi_exact_status == DOI_STATUS_MATCHED:
+        reasons.append("DOI 精确核验通过，DOI 元数据与输入记录未发现明确冲突")
+    elif doi_exact_status == DOI_STATUS_MISMATCH:
+        target = result.get("doi_target_title") or "另一条 DOI 元数据"
+        reasons.append(f"DOI 精确核验不匹配：输入 DOI 指向《{truncate(target, 100)}》")
+    elif doi_exact_status in {DOI_STATUS_UNRESOLVED, DOI_STATUS_NO_METADATA}:
+        reasons.append(f"DOI 精确核验未通过：{result.get('doi_check_message', doi_exact_status)}")
 
     if result.get("author_check") == "mismatch":
         reasons.append("作者列表与数据源不一致")
@@ -649,6 +1173,8 @@ def risk_explanation(result: dict) -> str:
 
     if result.get("source") == "URL(Web)":
         reasons.append("仅完成网页可访问性核验，页面作者、发布日期和版本仍需人工确认")
+    if result.get("actual_query_trace"):
+        reasons.append(f"实际查询路径：{result.get('actual_query_trace')}")
     if result.get("candidate_conflict") == "Yes":
         reasons.append(result.get("review_reasons") or "多个高相似度候选存在元数据冲突")
     if result.get("arbitration_reason"):
@@ -674,12 +1200,23 @@ def fix_suggestion(result: dict) -> tuple[str, str]:
         if result.get("matched_title"):
             suggestions.append("若最接近结果来自可信来源，可人工比对标题、作者、年份和 DOI 后再决定是否替换。")
 
+    if _is_web_evidence_result(result):
+        suggestions.append(
+            f"{source} 仅返回网页搜索结果；请打开候选链接，优先确认出版社/DOI/论文原文页面中的标题、作者、年份和 DOI。"
+        )
+
     if result.get("doi_check") == "mismatch":
         suggestions.append(
             f"优先核对 DOI：把输入 DOI {result.get('bib_doi') or '空'} 与 {source} 返回 DOI {result.get('matched_doi') or '空'} 逐项比对。"
         )
     elif result.get("doi_check") == "missing_in_bib" and result.get("matched_doi"):
         suggestions.append(f"可将 {source} 返回的 DOI {result.get('matched_doi')} 作为候选补充，但应先打开 DOI/出版社页面确认。")
+
+    doi_exact_status = result.get("doi_check_status")
+    if doi_exact_status == DOI_STATUS_MISMATCH:
+        suggestions.append("输入 DOI 可能指向另一篇论文；请优先打开 DOI 页面核对标题、作者和年份，不要直接沿用该 DOI。")
+    elif doi_exact_status in {DOI_STATUS_UNRESOLVED, DOI_STATUS_NO_METADATA}:
+        suggestions.append("DOI 暂时无法精确核验；请手动打开 doi.org 或出版社页面确认 DOI 是否有效。")
 
     if result.get("year_check") == "mismatch":
         suggestions.append(
@@ -782,6 +1319,14 @@ def standard_citations(result: dict) -> dict:
         return {
             "available": False,
             "basis": "未找到可靠数据库匹配，RefChecker 不会生成或补造规范引用。",
+            "apa": "",
+            "bibtex": "",
+            "gbt7714": "",
+        }
+    if _is_web_evidence_result(result):
+        return {
+            "available": False,
+            "basis": "仅有网页搜索证据，缺少结构化文献元数据；RefChecker 不会据此生成或补造规范引用。",
             "apa": "",
             "bibtex": "",
             "gbt7714": "",
@@ -930,11 +1475,23 @@ def confidence_score(result: dict) -> int:
     elif doi_check == "missing_in_bib":
         score -= 3
 
+    doi_exact_status = result.get("doi_check_status")
+    if doi_exact_status == DOI_STATUS_MATCHED:
+        score += 5
+    elif doi_exact_status == DOI_STATUS_MISMATCH:
+        score -= 42
+    elif doi_exact_status in {DOI_STATUS_UNRESOLVED, DOI_STATUS_NO_METADATA}:
+        score -= 8
+
     if result.get("candidate_conflict") == "Yes":
         score -= 18
 
     if result.get("needs_review") == "No":
         score += 3
+
+    if _is_web_evidence_result(result):
+        # Web search results are useful pages to open, but not metadata verification.
+        score = min(score, 64)
 
     return _clamp_score(score)
 
@@ -947,10 +1504,13 @@ def assess_risk_level(result: dict) -> str:
     author_check = result.get("author_check")
     year_check = result.get("year_check")
     doi_check = result.get("doi_check")
+    doi_exact_status = result.get("doi_check_status")
 
     if status == "skipped":
         return "high"
     if status == "not_found" or not result.get("found", True):
+        return "high"
+    if doi_exact_status == DOI_STATUS_MISMATCH:
         return "high"
     if doi_check == "mismatch":
         return "high"
@@ -963,8 +1523,15 @@ def assess_risk_level(result: dict) -> str:
 
     if author_check == "mismatch" or year_check == "mismatch":
         return "medium"
+    if doi_exact_status in {DOI_STATUS_UNRESOLVED, DOI_STATUS_NO_METADATA}:
+        return "medium"
     if source != "URL(Web)" and similarity < 0.90:
         return "medium"
+
+    if _is_web_evidence_result(result):
+        if not result.get("matched_doi") and result.get("author_check") != "exact" and result.get("year_check") != "exact":
+            return "medium"
+        return "low"
 
     if author_check == "partial":
         return "low"
@@ -1014,11 +1581,20 @@ def suggested_action(result: dict) -> str:
     elif result.get("doi_check") == "missing_in_bib" and result.get("matched_doi"):
         _append_action(actions, f"建议补充 DOI：{result.get('matched_doi')}")
 
+    doi_exact_status = result.get("doi_check_status")
+    if doi_exact_status == DOI_STATUS_MISMATCH:
+        _append_action(actions, "DOI 精确核验显示该 DOI 指向另一篇论文，请先替换或删除错误 DOI。")
+    elif doi_exact_status in {DOI_STATUS_UNRESOLVED, DOI_STATUS_NO_METADATA}:
+        _append_action(actions, "DOI 无法解析或缺少元数据，请人工打开 DOI/出版社页面确认。")
+
     if result.get("candidate_conflict") == "Yes":
         _append_action(actions, "多来源候选存在冲突，请打开 DOI/出版社页面或论文原文人工裁决。")
 
     if source == "URL(Web)":
         _append_action(actions, "仅验证网页可访问；建议人工确认页面标题、作者和发布日期。")
+
+    if _is_web_evidence_result(result):
+        _append_action(actions, "仅发现网页搜索证据；请点击候选页面人工核对，不能直接视为元数据验证通过。")
 
     return " ".join(actions) if actions else "无需处理。"
 
@@ -1065,7 +1641,10 @@ def build_summary(results: list[dict]) -> dict:
         "low_risk": [r for r in results if r.get("risk_level") == "low"],
         "author_mismatch": [r for r in results if r.get("author_check") == "mismatch"],
         "year_mismatch": [r for r in results if r.get("year_check") == "mismatch"],
-        "doi_mismatch": [r for r in results if r.get("doi_check") == "mismatch"],
+        "doi_mismatch": [
+            r for r in results
+            if r.get("doi_check") == "mismatch" or r.get("doi_check_status") == DOI_STATUS_MISMATCH
+        ],
     }
 
 
@@ -1259,6 +1838,87 @@ def _write_standard_citations_section(f, results: list[dict]) -> None:
         f.write(f"> 另有 {len(citation_rows) - 30} 条已找到文献的规范引用候选，请查看 CSV 完整字段。\n\n")
 
 
+def _web_evidence_rows(result: dict) -> list[dict]:
+    raw = result.get("web_evidence_results")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict] = []
+    for item in raw:
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows
+
+
+def _markdown_link(label: str, url: str, max_len: int = 80) -> str:
+    clean_url = _as_text(url)
+    clean_label = safe_table_text(label or clean_url or "open", max_len)
+    if not clean_url:
+        return clean_label
+    # Avoid breaking Markdown table links when URLs contain parentheses.
+    safe_url = clean_url.replace(")", "%29").replace("(", "%28")
+    return f"[{clean_label}]({safe_url})"
+
+
+def _doi_url_markdown(result: dict) -> str:
+    doi = clean_doi(result.get("matched_doi") or result.get("doi", ""))
+    url = _as_text(result.get("url"))
+    if doi:
+        return _markdown_link(doi, f"https://doi.org/{doi}", 45)
+    if url:
+        return _markdown_link(url, url, 45)
+    return ""
+
+
+def _write_web_evidence_section(f, results: list[dict]) -> None:
+    rows = [
+        r for r in results
+        if _is_web_evidence_result(r) or _web_evidence_rows(r) or _as_text(r.get("web_evidence_links"))
+    ]
+    if not rows:
+        return
+    f.write("## 网页搜索证据（仅辅助，不等同于元数据验证）\n\n")
+    f.write(
+        "> 以下结果来自 Brave 等网页搜索型自定义源。它们可作为可点击的网页证据，"
+        "但不提供结构化作者、年份、DOI 或出版元数据；请打开链接人工确认。\n\n"
+    )
+    for r in rows:
+        f.write(f"### `{safe_table_text(r.get('key', ''), 80)}`\n\n")
+        note = r.get("web_evidence_note") or "Web search evidence only; verify metadata manually."
+        f.write(f"- 说明: {note}\n")
+        if r.get("matched_title"):
+            f.write(
+                f"- 最接近网页标题: {safe_table_text(r.get('matched_title', ''), 120)} "
+                f"（标题相似度 {r.get('similarity', 0):.0%}）\n"
+            )
+        evidence = _web_evidence_rows(r)
+        if evidence:
+            f.write("\n| 排名 | 网页标题 | 来源 | 相似度 | 链接 |\n")
+            f.write("|---:|---|---|---:|---|\n")
+            for item in evidence[:5]:
+                sim = item.get("similarity")
+                try:
+                    sim_text = f"{float(sim):.0%}"
+                except Exception:
+                    sim_text = ""
+                f.write(
+                    f"| {item.get('rank', '')} "
+                    f"| {safe_table_text(item.get('title', ''), 70)} "
+                    f"| {safe_table_text(item.get('source', ''), 35)} "
+                    f"| {sim_text} "
+                    f"| {_markdown_link('打开页面', item.get('url', ''), 20)} |\n"
+                )
+            f.write("\n")
+        elif r.get("web_evidence_links"):
+            f.write("\n```text\n")
+            f.write(_as_text(r.get("web_evidence_links")).strip() + "\n")
+            f.write("```\n\n")
+
+
 def write_markdown_report(path: str, *, bibfile: str, sources: str, threshold: float,
                           total: int, results: list[dict], summary: dict,
                           citation_consistency: dict | None = None,
@@ -1281,6 +1941,13 @@ def write_markdown_report(path: str, *, bibfile: str, sources: str, threshold: f
             f.write(f"- RefChecker 版本: **v{app_version}**\n")
         f.write(f"- 文件: `{bibfile}`\n")
         f.write(f"- 数据源: **{sources}**\n")
+        if summary.get("search_mode"):
+            mode_label = "严格顺序" if summary.get("search_mode") == SEARCH_MODE_STRICT else "快速并发"
+            f.write(f"- 搜索模式: **{mode_label}**\n")
+        if summary.get("source_order"):
+            f.write(f"- 搜索链: **{summary.get('source_order')}**\n")
+        if summary.get("llm_parse_mode"):
+            f.write(f"- 解析方式: **{summary.get('parser_summary') or 'rules'}**（LLM 模式: {summary.get('llm_parse_mode')}）\n")
         f.write(f"- 标题相似度阈值: **{threshold:.0%}**\n")
         f.write(
             f"- 总数: **{total}** | ✅ 找到: **{len(found)}** | ❌ 未找到: **{len(missing)}** "
@@ -1308,6 +1975,8 @@ def write_markdown_report(path: str, *, bibfile: str, sources: str, threshold: f
         )
         f.write("## 隐私与边界说明\n\n")
         f.write("- 修复建议必须依据数据库返回结果、URL 验证结果或正文一致性检查；证据不足时应人工核查。\n")
+        f.write("\n")
+        _write_web_evidence_section(f, results)
         _write_citation_consistency_section(f, citation_consistency)
 
         if high_risk or medium_risk:
@@ -1348,6 +2017,12 @@ def write_markdown_report(path: str, *, bibfile: str, sources: str, threshold: f
                         f"(标题相似度 {r.get('similarity', 0):.0%})\n"
                     )
                 f.write(f"- 作者核查: {r.get('author_reason', '')}\n\n")
+                if r.get("doi_check_status") and r.get("doi_check_status") != DOI_STATUS_NOT_PROVIDED:
+                    f.write(f"- DOI 精确核验: {r.get('doi_check_status')}；{r.get('doi_check_message', '')}\n")
+                    if r.get("doi_target_title"):
+                        f.write(f"- DOI 指向标题: {r.get('doi_target_title')}\n")
+                if r.get("actual_query_trace"):
+                    f.write(f"- 实际查询路径: {r.get('actual_query_trace')}\n")
                 f.write(f"- 修复建议: {r.get('fix_suggestion') or r.get('suggested_action', '')}\n")
                 f.write(f"- 依据来源: {r.get('fix_suggestion_basis', '')}\n\n")
 
@@ -1370,20 +2045,21 @@ def write_markdown_report(path: str, *, bibfile: str, sources: str, threshold: f
 
         if found:
             f.write("\n## ✅ 已找到的文献\n\n")
-            f.write("| Key | 风险 | 置信度 | 标题 | 来源 | 标题相似度 | 作者 | 年份 | DOI/URL |\n")
-            f.write("|---|---|---:|---|---|---:|---|---|---|\n")
+            f.write("| Key | 风险 | 置信度 | 标题 | DOI 精确核验 | 最终采用 | 标题相似度 | 作者 | 年份 | DOI/URL |\n")
+            f.write("|---|---|---:|---|---|---|---:|---|---|---|\n")
             for r in found:
-                link = r.get("matched_doi") or r.get("doi") or r.get("url", "")
+                link = _doi_url_markdown(r)
                 f.write(
                     f"| {safe_table_text(r['key'], 40)} "
                     f"| {risk_badge_markdown(r.get('risk_level', 'none'))} "
                     f"| {r.get('confidence_score', 0)} "
                     f"| {safe_table_text(r['title'], 50)} "
-                    f"| {safe_table_text(r.get('source', ''), 20)} "
+                    f"| {safe_table_text(r.get('doi_check_status', ''), 18)} "
+                    f"| {safe_table_text(r.get('adopted_source') or r.get('source', ''), 20)} "
                     f"| **{r.get('similarity', 0):.0%}** "
                     f"| {status_icon(r.get('author_check'))} {safe_table_text(r.get('author_check', ''), 12)} "
                     f"| {status_icon(r.get('year_check'))} {safe_table_text(r.get('matched_year', ''), 8)} "
-                    f"| {safe_table_text(link, 45)} |\n"
+                    f"| {link or safe_table_text('', 45)} |\n"
                 )
 
         if author_mismatch:
@@ -1399,7 +2075,7 @@ def write_markdown_report(path: str, *, bibfile: str, sources: str, threshold: f
                     f.write(f"- BibTeX 可能省略: {r.get('missing_authors')}\n")
                 if r.get("extra_authors"):
                     f.write(f"- BibTeX 可能额外/可疑: {r.get('extra_authors')}\n")
-                f.write(f"- ????: {r.get('fix_suggestion', '')}\n")
+                f.write(f"- 修复建议: {r.get('fix_suggestion', '')}\n")
                 f.write(f"- 依据来源: {r.get('fix_suggestion_basis', '')}\n")
                 f.write("\n")
 
@@ -1418,11 +2094,18 @@ def write_csv_report(path: str, results: list[dict]) -> None:
         "key", "status", "needs_review", "risk_level", "confidence_score",
         "suggested_action", "review_reasons",
         "risk_explanation", "fix_suggestion", "fix_suggestion_basis",
+        "parser", "parser_note", "parser_confidence", "parser_warning", "llm_parse_mode",
+        "search_mode", "source_order", "actual_query_trace", "query_trace",
+        "adopted_source",
+        "doi_check_status", "doi_check_message", "doi_resolved_url",
+        "doi_target_title", "doi_target_authors", "doi_target_year", "doi_target_doi",
         "candidate_count", "arbitration_reason", "source_trace",
         "alternative_candidates", "candidate_conflict",
         "standard_citation_available", "standard_citation_basis",
         "standard_citation_apa", "standard_citation_bibtex",
         "standard_citation_gbt7714", "standard_citation_json",
+        "web_evidence", "evidence_kind", "web_evidence_note",
+        "web_evidence_links", "web_evidence_results", "snippet",
         "bib_title", "matched_title", "similarity", "source", "venue", "year", "type",
         "bib_year", "matched_year", "year_check", "year_reason",
         "bib_doi", "matched_doi", "doi_check", "doi_reason",
@@ -1438,6 +2121,8 @@ def write_csv_report(path: str, results: list[dict]) -> None:
             row["bib_title"] = r.get("title", "")
             row["matched_title"] = r.get("matched_title", "")
             row["similarity"] = f"{r.get('similarity', 0):.2%}" if r.get("similarity") is not None else ""
+            if isinstance(row.get("web_evidence_results"), (list, dict)):
+                row["web_evidence_results"] = json.dumps(row.get("web_evidence_results"), ensure_ascii=False)
             writer.writerow(row)
 
 
@@ -1451,14 +2136,30 @@ def printable_result(result: dict) -> dict:
         "key", "title", "status", "needs_review", "risk_level",
         "confidence_score", "suggested_action", "review_reasons",
         "risk_explanation", "fix_suggestion", "fix_suggestion_basis",
+        "parser", "parser_note", "parser_confidence", "parser_warning", "llm_parse_mode",
         "candidate_count", "arbitration_reason", "source_trace",
+        "search_mode", "source_order", "actual_query_trace", "query_trace",
+        "adopted_source", "doi_check_status", "doi_check_message",
+        "doi_resolved_url", "doi_target_title", "doi_target_year", "doi_target_doi",
         "alternative_candidates", "candidate_conflict",
         "standard_citation_available", "standard_citation_basis",
         "standard_citation_apa", "standard_citation_bibtex",
         "standard_citation_gbt7714",
+        "web_evidence", "evidence_kind", "web_evidence_note",
+        "web_evidence_links", "web_evidence_results", "snippet",
         "matched_title", "similarity", "source", "venue", "year", "type",
         "author_check", "author_reason", "year_check", "year_reason",
-        "doi_check", "doi_reason", "bib_doi", "matched_doi", "doi", "url", "reason",
+        "doi_check", "doi_reason", "bib_doi", "matched_doi", "doi", "url",
+        "bib_url", "bib_year", "matched_year",
+        "bib_author_count", "matched_author_count", "author_order_mismatch",
+        "bib_authors", "matched_authors", "missing_authors", "extra_authors",
+        "authors", "reason",
     ]
-    return {key: result.get(key, "") for key in keys}
+    printable = {}
+    for key in keys:
+        value = result.get(key, "")
+        if key == "web_evidence_results" and isinstance(value, (list, dict)):
+            value = json.dumps(value, ensure_ascii=False)
+        printable[key] = value
+    return printable
 

@@ -69,6 +69,15 @@ from refchecker.url_verify import (  # noqa: F401, E402
 from refchecker.verifier import (  # noqa: F401, E402
     CONFIDENCE_EXPLANATION,
     CONFIDENCE_SCALE,
+    DOI_CHECK_AUTO,
+    DOI_CHECK_OFF,
+    DOI_STATUS_MATCHED,
+    DOI_STATUS_MISMATCH,
+    DOI_STATUS_NO_METADATA,
+    DOI_STATUS_NOT_PROVIDED,
+    DOI_STATUS_UNRESOLVED,
+    SEARCH_MODE_PARALLEL,
+    SEARCH_MODE_STRICT,
     apply_product_assessment,
     assess_risk_level,
     build_summary,
@@ -92,6 +101,14 @@ from refchecker.docx_parser import (  # noqa: F401, E402
     extract_references_from_docx,
     parse_reference_text,
     parse_text_references,
+)
+from refchecker.llm_parser import (  # noqa: F401, E402
+    LLM_PARSE_ALWAYS,
+    LLM_PARSE_AUTO,
+    LLM_PARSE_OFF,
+    apply_llm_parsing,
+    normalize_llm_parse_mode,
+    reference_needs_llm_parse,
 )
 from refchecker.batch import (  # noqa: F401, E402
     verify_bib_file,
